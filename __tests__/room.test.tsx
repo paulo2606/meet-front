@@ -81,9 +81,18 @@ const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection } = vi.
     closed = false;
     onicecandidate: ((event: { candidate: unknown }) => void) | null = null;
     ontrack: ((event: { streams: MediaStream[] }) => void) | null = null;
+    senders: { track: { kind: string } | null; replaceTrack: ReturnType<typeof vi.fn> }[];
 
     constructor(public config: RTCConfiguration) {
       FakeRTCPeerConnection.instances.push(this);
+      this.senders = [
+        { track: { kind: "video" }, replaceTrack: vi.fn() },
+        { track: { kind: "audio" }, replaceTrack: vi.fn() },
+      ];
+    }
+
+    getSenders() {
+      return this.senders;
     }
 
     addTrack(track: MediaStreamTrack) {
@@ -138,12 +147,31 @@ const meeting: MeetingResponse = {
 const fakeTrack = (kind: string) => ({ kind, enabled: true, stop: vi.fn() });
 const videoTrack = fakeTrack("video");
 const audioTrack = fakeTrack("audio");
+const screenTrack = fakeTrack("video");
+const streamTracks: { kind: string; enabled: boolean; stop: ReturnType<typeof vi.fn> }[] = [videoTrack, audioTrack];
 const fakeStream = {
-  getTracks: () => [videoTrack, audioTrack],
-  getAudioTracks: () => [audioTrack],
-  getVideoTracks: () => [videoTrack],
+  getTracks: () => streamTracks,
+  getAudioTracks: () => streamTracks.filter((track) => track.kind === "audio"),
+  getVideoTracks: () => streamTracks.filter((track) => track.kind === "video"),
+  addTrack(track: { kind: string; enabled: boolean; stop: ReturnType<typeof vi.fn> }) {
+    streamTracks.push(track);
+  },
+  removeTrack(track: { kind: string; enabled: boolean; stop: ReturnType<typeof vi.fn> }) {
+    const index = streamTracks.indexOf(track);
+    if (index >= 0) {
+      streamTracks.splice(index, 1);
+    }
+  },
+};
+const fakeScreenStream = {
+  getTracks: () => [screenTrack],
+  getAudioTracks: () => [],
+  getVideoTracks: () => [screenTrack],
 };
 const getUserMediaMock = vi.fn();
+const getDisplayMediaMock = vi.fn();
+const requestFullscreenMock = vi.fn();
+const exitFullscreenMock = vi.fn();
 
 describe("RoomPage WebRTC", () => {
   beforeEach(() => {
@@ -152,6 +180,8 @@ describe("RoomPage WebRTC", () => {
     authRequestMock.mockResolvedValue(meeting);
     fakeConnections.length = 0;
     FakeRTCPeerConnection.instances = [];
+    streamTracks.length = 0;
+    streamTracks.push(videoTrack, audioTrack);
     Object.defineProperty(globalThis, "RTCPeerConnection", {
       value: FakeRTCPeerConnection,
       configurable: true,
@@ -163,10 +193,26 @@ describe("RoomPage WebRTC", () => {
     });
     getUserMediaMock.mockReset();
     getUserMediaMock.mockResolvedValue(fakeStream);
+    getDisplayMediaMock.mockReset();
+    getDisplayMediaMock.mockResolvedValue(fakeScreenStream);
     Object.defineProperty(navigator, "mediaDevices", {
       value: {
         getUserMedia: getUserMediaMock,
+        getDisplayMedia: getDisplayMediaMock,
       },
+      configurable: true,
+    });
+    Object.defineProperty(document, "fullscreenElement", {
+      value: null,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(document.documentElement, "requestFullscreen", {
+      value: requestFullscreenMock,
+      configurable: true,
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      value: exitFullscreenMock,
       configurable: true,
     });
     Object.assign(navigator, {
@@ -321,5 +367,65 @@ describe("RoomPage WebRTC", () => {
 
     expect(await screen.findByText("bom dia")).toBeInTheDocument();
     expect(screen.getByText("Bruno")).toBeInTheDocument();
+  });
+
+  it("compartilha a tela substituindo o track de video das conexoes", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    connection.trigger("PeerJoined", "peer-1", "Bruno");
+    const peer = FakeRTCPeerConnection.instances[0];
+
+    fireEvent.click(screen.getByRole("button", { name: /compartilhar tela/ }));
+
+    await waitFor(() => expect(getDisplayMediaMock).toHaveBeenCalled());
+    await waitFor(() => expect(peer.senders[0].replaceTrack).toHaveBeenCalledWith(screenTrack));
+    expect(peer.senders[1].replaceTrack).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("screen-video")).toBeInTheDocument();
+    expect(screen.getByTestId("local-video")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /parar de compartilhar a tela/ })).toBeInTheDocument();
+  });
+
+  it("para de compartilhar a tela e restaura a camera", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    connection.trigger("PeerJoined", "peer-1", "Bruno");
+    const peer = FakeRTCPeerConnection.instances[0];
+
+    fireEvent.click(screen.getByRole("button", { name: /compartilhar tela/ }));
+    await waitFor(() => expect(peer.senders[0].replaceTrack).toHaveBeenCalledWith(screenTrack));
+
+    fireEvent.click(screen.getByRole("button", { name: /parar de compartilhar a tela/ }));
+
+    await waitFor(() => expect(peer.senders[0].replaceTrack).toHaveBeenCalledWith(videoTrack));
+    expect(screenTrack.stop).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByTestId("screen-video")).not.toBeInTheDocument());
+    expect(screen.getByTestId("local-video")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /compartilhar tela/ })).toBeInTheDocument();
+  });
+
+  it("alterna a tela cheia", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /alternar tela cheia/ }));
+    expect(requestFullscreenMock).toHaveBeenCalled();
+
+    Object.defineProperty(document, "fullscreenElement", {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /alternar tela cheia/ }));
+    expect(exitFullscreenMock).toHaveBeenCalled();
   });
 });

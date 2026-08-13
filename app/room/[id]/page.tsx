@@ -2,10 +2,23 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
 import { useAuth } from "@/components/auth-context";
 import { CameraIcon } from "@/components/logo";
 import { ApiError, type MeetingResponse } from "@/lib/api";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
+const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+
+function newParticipantId() {
+  return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+}
+
+type RemoteStream = {
+  participantId: string;
+  stream: MediaStream;
+};
 
 export default function RoomPage() {
   const { id } = useParams<{ id: string }>();
@@ -13,6 +26,16 @@ export default function RoomPage() {
   const [meeting, setMeeting] = useState<MeetingResponse | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [joined, setJoined] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const [micOn, setMicOn] = useState(true);
+  const [cameraOn, setCameraOn] = useState(true);
+  const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const connectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const hubRef = useRef<HubConnection | null>(null);
+  const participantIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -30,12 +53,242 @@ export default function RoomPage() {
     };
   }, [id, authRequest]);
 
+  useEffect(
+    () => () => {
+      for (const connection of connectionsRef.current.values()) {
+        connection.close();
+      }
+      localStreamRef.current?.getTracks().forEach((track) => track.stop());
+      hubRef.current?.stop();
+    },
+    [],
+  );
+
+  const removePeer = useCallback((participantId: string) => {
+    const connection = connectionsRef.current.get(participantId);
+    if (connection) {
+      connection.close();
+      connectionsRef.current.delete(participantId);
+    }
+    setRemoteStreams((prev) => prev.filter((remote) => remote.participantId !== participantId));
+  }, []);
+
+  const createPeer = useCallback(
+    (participantId: string, shouldOffer: boolean): RTCPeerConnection => {
+      const existing = connectionsRef.current.get(participantId);
+      if (existing) {
+        return existing;
+      }
+
+      const connection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      connectionsRef.current.set(participantId, connection);
+
+      connection.onicecandidate = (event) => {
+        if (event.candidate && hubRef.current) {
+          hubRef.current.invoke("IceCandidate", id, participantId, JSON.stringify(event.candidate));
+        }
+      };
+      connection.ontrack = (event) => {
+        setRemoteStreams((prev) => {
+          if (prev.some((remote) => remote.participantId === participantId)) {
+            return prev;
+          }
+          return [...prev, { participantId, stream: event.streams[0] }];
+        });
+      };
+
+      localStreamRef.current?.getTracks().forEach((track) => connection.addTrack(track, localStreamRef.current!));
+
+      if (shouldOffer) {
+        connection.createOffer().then((offer) => {
+          connection.setLocalDescription(offer);
+          hubRef.current?.invoke("Offer", id, participantId, JSON.stringify(offer));
+        });
+      }
+
+      return connection;
+    },
+    [id],
+  );
+
+  async function handleJoin() {
+    setJoining(true);
+    setError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStreamRef.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      const connection = new HubConnectionBuilder().withUrl(`${API_URL}/hubs/meeting`).build();
+      hubRef.current = connection;
+      participantIdRef.current = newParticipantId();
+
+      connection.on("Peers", (peerIds: string[]) => {
+        peerIds.forEach((peerId) => createPeer(peerId, true));
+      });
+      connection.on("PeerJoined", (participantId: string) => {
+        createPeer(participantId, false);
+      });
+      connection.on("Offer", async (meetingId: string, fromParticipantId: string, sdp: string) => {
+        const peer = createPeer(fromParticipantId, false);
+        await peer.setRemoteDescription(JSON.parse(sdp));
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+        await connection.invoke("Answer", meetingId, fromParticipantId, JSON.stringify(answer));
+      });
+      connection.on("Answer", async (_meetingId: string, fromParticipantId: string, sdp: string) => {
+        const peer = connectionsRef.current.get(fromParticipantId);
+        if (peer) {
+          await peer.setRemoteDescription(JSON.parse(sdp));
+        }
+      });
+      connection.on("IceCandidate", async (_meetingId: string, fromParticipantId: string, candidate: string) => {
+        const peer = connectionsRef.current.get(fromParticipantId);
+        if (peer) {
+          await peer.addIceCandidate(JSON.parse(candidate));
+        }
+      });
+      connection.on("PeerLeft", (participantId: string) => {
+        removePeer(participantId);
+      });
+
+      await connection.start();
+      await connection.invoke("Join", id, participantIdRef.current, user?.name ?? "Convidado");
+      setJoined(true);
+    } catch {
+      setError("nao foi possivel entrar na reuniao");
+      setJoined(false);
+      localStreamRef.current?.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
+    } finally {
+      setJoining(false);
+    }
+  }
+
+  async function handleLeave() {
+    for (const connection of connectionsRef.current.values()) {
+      connection.close();
+    }
+    connectionsRef.current.clear();
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
+    setRemoteStreams([]);
+    setJoined(false);
+    await hubRef.current?.stop();
+    hubRef.current = null;
+  }
+
+  function toggleMic() {
+    localStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !track.enabled;
+    });
+    setMicOn((value) => !value);
+  }
+
+  function toggleCamera() {
+    localStreamRef.current?.getVideoTracks().forEach((track) => {
+      track.enabled = !track.enabled;
+    });
+    setCameraOn((value) => !value);
+  }
+
   const inviteUrl = meeting ? `${window.location.origin}/room/${meeting.id}` : "";
 
   async function handleCopy() {
     await navigator.clipboard.writeText(inviteUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  if (joined) {
+    return (
+      <div className="flex flex-1 flex-col">
+        <header className="flex items-center justify-between px-6 py-4">
+          <Link href="/" className="flex items-center gap-3">
+            <CameraIcon className="h-8 w-8 text-blue-700" />
+            <span className="text-xl font-medium text-zinc-900">Meet</span>
+          </Link>
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-700 text-sm font-medium text-white">
+              {(user?.name ?? "Convidado").charAt(0).toUpperCase()}
+            </div>
+            <span className="text-sm text-zinc-600">{user?.name ?? "Convidado"}</span>
+          </div>
+        </header>
+
+        <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-8">
+          <div className="grid w-full max-w-5xl grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
+              <video
+                autoPlay
+                muted
+                playsInline
+                data-testid="local-video"
+                ref={(el) => {
+                  localVideoRef.current = el;
+                  if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
+                    el.srcObject = localStreamRef.current;
+                  }
+                }}
+                className="h-full w-full object-cover"
+              />
+              {!cameraOn && <p className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">camera desativada</p>}
+              <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
+            </div>
+
+            {remoteStreams.length === 0 && (
+              <div className="flex aspect-video items-center justify-center rounded-2xl bg-zinc-100 text-sm text-zinc-500">
+                aguardando outros participantes
+              </div>
+            )}
+            {remoteStreams.map(({ participantId, stream }) => (
+              <div key={participantId} className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
+                <video
+                  autoPlay
+                  playsInline
+                  data-testid={`remote-video-${participantId}`}
+                  ref={(el) => {
+                    if (el && el.srcObject !== stream) {
+                      el.srcObject = stream;
+                    }
+                  }}
+                  className="h-full w-full object-cover"
+                />
+                <p className="absolute bottom-2 left-3 text-sm text-white/90">participante</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={toggleMic}
+              aria-label={micOn ? "desligar microfone" : "ligar microfone"}
+              className={`flex h-12 w-12 items-center justify-center rounded-full text-white transition ${micOn ? "bg-zinc-800 hover:bg-zinc-700" : "bg-red-600 hover:bg-red-700"}`}
+            >
+              {micOn ? "mic" : "mudo"}
+            </button>
+            <button
+              type="button"
+              onClick={toggleCamera}
+              aria-label={cameraOn ? "desligar camera" : "ligar camera"}
+              className={`flex h-12 w-12 items-center justify-center rounded-full text-white transition ${cameraOn ? "bg-zinc-800 hover:bg-zinc-700" : "bg-red-600 hover:bg-red-700"}`}
+            >
+              {cameraOn ? "cam" : "cam off"}
+            </button>
+            <button
+              type="button"
+              onClick={handleLeave}
+              className="flex h-12 items-center justify-center rounded-full bg-red-600 px-6 text-sm font-medium text-white transition hover:bg-red-700"
+            >
+              sair da reuniao
+            </button>
+          </div>
+        </main>
+      </div>
+    );
   }
 
   return (
@@ -74,8 +327,16 @@ export default function RoomPage() {
             <div className="flex flex-col items-center gap-2">
               <button
                 type="button"
+                onClick={handleJoin}
+                disabled={joining}
+                className="rounded-full bg-blue-700 px-6 py-3 text-sm font-medium text-white transition hover:bg-blue-800 disabled:opacity-60"
+              >
+                {joining ? "entrando..." : "entrar na reuniao"}
+              </button>
+              <button
+                type="button"
                 onClick={handleCopy}
-                className="rounded-full bg-blue-700 px-6 py-3 text-sm font-medium text-white transition hover:bg-blue-800"
+                className="rounded-full border border-zinc-300 px-6 py-3 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
               >
                 {copied ? "link copiado" : "copiar link de convite"}
               </button>

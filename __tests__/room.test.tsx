@@ -194,7 +194,10 @@ describe("RoomPage WebRTC", () => {
     await screen.findByTestId("local-video");
 
     const connection = fakeConnections[0];
-    connection.trigger("Peers", ["peer-1", "peer-2"]);
+    connection.trigger("Peers", [
+      { participantId: "peer-1", name: "Bruno" },
+      { participantId: "peer-2", name: "Carla" },
+    ]);
 
     await waitFor(() => expect(FakeRTCPeerConnection.instances).toHaveLength(2));
     const offers = connection.invokes.filter((i) => i.method === "Offer");
@@ -210,7 +213,7 @@ describe("RoomPage WebRTC", () => {
     await screen.findByTestId("local-video");
 
     const connection = fakeConnections[0];
-    connection.trigger("PeerJoined", "peer-1");
+    connection.trigger("PeerJoined", "peer-1", "Bruno");
     const peer = FakeRTCPeerConnection.instances[0];
 
     await waitFor(() => expect(peer.createdOffer).toBe(false));
@@ -232,7 +235,7 @@ describe("RoomPage WebRTC", () => {
     await screen.findByTestId("local-video");
 
     const connection = fakeConnections[0];
-    connection.trigger("PeerJoined", "peer-1");
+    connection.trigger("PeerJoined", "peer-1", "Bruno");
     const peer = FakeRTCPeerConnection.instances[0];
 
     connection.trigger("IceCandidate", "meeting-1", "peer-1", JSON.stringify({ candidate: "cand-1" }));
@@ -247,7 +250,7 @@ describe("RoomPage WebRTC", () => {
     await screen.findByTestId("local-video");
 
     const connection = fakeConnections[0];
-    connection.trigger("PeerJoined", "peer-1");
+    connection.trigger("PeerJoined", "peer-1", "Bruno");
     const peer = FakeRTCPeerConnection.instances[0];
 
     fireEvent.click(screen.getByRole("button", { name: /sair da reuniao/ }));
@@ -269,5 +272,54 @@ describe("RoomPage WebRTC", () => {
 
     expect(await screen.findByText("nao foi possivel entrar na reuniao")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /entrar na reuniao/ })).toBeInTheDocument();
+  });
+
+  it("lista participantes com nome conforme entram e saem", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    connection.trigger("Peers", [{ participantId: "peer-1", name: "Bruno" }]);
+    connection.trigger("PeerJoined", "peer-2", "Carla");
+    fireEvent.click(screen.getByRole("button", { name: /participantes/i }));
+
+    expect(await screen.findByText("Bruno")).toBeInTheDocument();
+    expect(screen.getByText("Carla")).toBeInTheDocument();
+    expect(screen.getByText("(voce)")).toBeInTheDocument();
+
+    connection.trigger("PeerLeft", "peer-1");
+
+    await waitFor(() => expect(screen.queryByText("Bruno")).not.toBeInTheDocument());
+    expect(screen.getByText("Carla")).toBeInTheDocument();
+  });
+
+  it("envia mensagem no chat pelo hub", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /chat/i }));
+    fireEvent.change(screen.getByLabelText("mensagem do chat"), { target: { value: "ola pessoal" } });
+    fireEvent.click(screen.getByRole("button", { name: /enviar/ }));
+
+    await waitFor(() =>
+      expect(fakeConnections[0].invokes.some((i) => i.method === "SendMessage" && i.args[0] === "meeting-1" && i.args[1] === "ola pessoal")).toBe(true),
+    );
+  });
+
+  it("mostra mensagem recebida no chat", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /chat/i }));
+    fakeConnections[0].trigger("Message", "peer-1", "Bruno", "bom dia");
+
+    expect(await screen.findByText("bom dia")).toBeInTheDocument();
+    expect(screen.getByText("Bruno")).toBeInTheDocument();
   });
 });

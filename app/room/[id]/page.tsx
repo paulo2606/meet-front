@@ -46,6 +46,10 @@ export default function RoomPage() {
   const [selfId, setSelfId] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
+  const screenTrackRef = useRef<MediaStreamTrack | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatText, setChatText] = useState("");
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -134,6 +138,7 @@ export default function RoomPage() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
+      cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
@@ -226,6 +231,55 @@ export default function RoomPage() {
     setChatText("");
   }
 
+  async function handleShareScreen() {
+    if (sharing) {
+      stopScreenShare();
+      return;
+    }
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const screenTrack = screenStream.getVideoTracks()[0];
+      if (!screenTrack) {
+        return;
+      }
+      screenStreamRef.current = screenStream;
+      screenTrackRef.current = screenTrack;
+      screenTrack.onended = () => stopScreenShare();
+      for (const connection of connectionsRef.current.values()) {
+        const sender = connection.getSenders().find((candidate) => candidate.track?.kind === "video");
+        await sender?.replaceTrack(screenTrack);
+      }
+      setSharing(true);
+    } catch {
+      setSharing(false);
+    }
+  }
+
+  function stopScreenShare() {
+    const screenTrack = screenTrackRef.current;
+    const cameraTrack = cameraTrackRef.current;
+    if (cameraTrack) {
+      for (const connection of connectionsRef.current.values()) {
+        const sender = connection.getSenders().find((candidate) => candidate.track?.kind === "video");
+        sender?.replaceTrack(cameraTrack);
+      }
+    }
+    screenTrack?.stop();
+    screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    screenTrackRef.current = null;
+    screenStreamRef.current = null;
+    cameraTrackRef.current = null;
+    setSharing(false);
+  }
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen();
+    }
+  }
+
   function toggleMic() {
     localStreamRef.current?.getAudioTracks().forEach((track) => {
       track.enabled = !track.enabled;
@@ -288,7 +342,24 @@ export default function RoomPage() {
             </button>
           </div>
 
-          <div className="grid w-full max-w-5xl grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid w-full max-w-5xl grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
+            {sharing && (
+              <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
+                <video
+                  autoPlay
+                  muted
+                  playsInline
+                  data-testid="screen-video"
+                  ref={(el) => {
+                    if (el && screenStreamRef.current && el.srcObject !== screenStreamRef.current) {
+                      el.srcObject = screenStreamRef.current;
+                    }
+                  }}
+                  className="h-full w-full object-cover"
+                />
+                <p className="absolute bottom-2 left-3 text-sm text-white/90">minha tela</p>
+              </div>
+            )}
             <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
               <video
                 autoPlay
@@ -348,6 +419,22 @@ export default function RoomPage() {
               className={`flex h-12 w-12 items-center justify-center rounded-full text-white transition ${cameraOn ? "bg-zinc-800 hover:bg-zinc-700" : "bg-red-600 hover:bg-red-700"}`}
             >
               {cameraOn ? "cam" : "cam off"}
+            </button>
+            <button
+              type="button"
+              onClick={handleShareScreen}
+              aria-label={sharing ? "parar de compartilhar a tela" : "compartilhar tela"}
+              className={`flex h-12 items-center justify-center rounded-full px-5 text-sm font-medium text-white transition ${sharing ? "bg-blue-700 hover:bg-blue-800" : "bg-zinc-800 hover:bg-zinc-700"}`}
+            >
+              {sharing ? "parar" : "compartilhar tela"}
+            </button>
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              aria-label="alternar tela cheia"
+              className="flex h-12 items-center justify-center rounded-full bg-zinc-800 px-5 text-sm font-medium text-white transition hover:bg-zinc-700"
+            >
+              tela cheia
             </button>
             <button
               type="button"

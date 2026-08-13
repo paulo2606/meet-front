@@ -20,6 +20,17 @@ type RemoteStream = {
   stream: MediaStream;
 };
 
+type Participant = {
+  participantId: string;
+  name: string;
+};
+
+type ChatMessage = {
+  participantId: string;
+  name: string;
+  text: string;
+};
+
 export default function RoomPage() {
   const { id } = useParams<{ id: string }>();
   const { user, authRequest } = useAuth();
@@ -31,6 +42,12 @@ export default function RoomPage() {
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [selfId, setSelfId] = useState("");
+  const [chatOpen, setChatOpen] = useState(false);
+  const [participantsOpen, setParticipantsOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatText, setChatText] = useState("");
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const connectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -124,12 +141,32 @@ export default function RoomPage() {
       const connection = new HubConnectionBuilder().withUrl(`${API_URL}/hubs/meeting`).build();
       hubRef.current = connection;
       participantIdRef.current = newParticipantId();
+      setSelfId(participantIdRef.current);
+      const selfName = user?.name ?? "Convidado";
+      setParticipants([{ participantId: participantIdRef.current, name: selfName }]);
 
-      connection.on("Peers", (peerIds: string[]) => {
-        peerIds.forEach((peerId) => createPeer(peerId, true));
+      const addParticipant = (participant: Participant) => {
+        setParticipants((prev) =>
+          prev.some((existing) => existing.participantId === participant.participantId) ? prev : [...prev, participant],
+        );
+      };
+
+      connection.on("Peers", (peers: Participant[]) => {
+        peers.forEach((peer) => {
+          addParticipant(peer);
+          createPeer(peer.participantId, true);
+        });
       });
-      connection.on("PeerJoined", (participantId: string) => {
+      connection.on("PeerJoined", (participantId: string, name: string) => {
+        addParticipant({ participantId, name });
         createPeer(participantId, false);
+      });
+      connection.on("PeerLeft", (participantId: string) => {
+        removePeer(participantId);
+        setParticipants((prev) => prev.filter((participant) => participant.participantId !== participantId));
+      });
+      connection.on("Message", (participantId: string, name: string, text: string) => {
+        setChatMessages((prev) => [...prev, { participantId, name, text }]);
       });
       connection.on("Offer", async (meetingId: string, fromParticipantId: string, sdp: string) => {
         const peer = createPeer(fromParticipantId, false);
@@ -150,12 +187,9 @@ export default function RoomPage() {
           await peer.addIceCandidate(JSON.parse(candidate));
         }
       });
-      connection.on("PeerLeft", (participantId: string) => {
-        removePeer(participantId);
-      });
 
       await connection.start();
-      await connection.invoke("Join", id, participantIdRef.current, user?.name ?? "Convidado");
+      await connection.invoke("Join", id, participantIdRef.current, selfName);
       setJoined(true);
     } catch {
       setError("nao foi possivel entrar na reuniao");
@@ -175,9 +209,21 @@ export default function RoomPage() {
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     setRemoteStreams([]);
+    setParticipants([]);
+    setChatMessages([]);
+    setChatOpen(false);
     setJoined(false);
     await hubRef.current?.stop();
     hubRef.current = null;
+  }
+
+  async function sendChatMessage() {
+    const text = chatText.trim();
+    if (!text || !hubRef.current) {
+      return;
+    }
+    await hubRef.current.invoke("SendMessage", id, text);
+    setChatText("");
   }
 
   function toggleMic() {
@@ -218,7 +264,30 @@ export default function RoomPage() {
           </div>
         </header>
 
-        <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-8">
+        <main className="relative flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-8">
+          <div className="flex w-full max-w-5xl items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setParticipantsOpen(true);
+                setChatOpen(false);
+              }}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition ${participantsOpen ? "bg-blue-700 text-white" : "border border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
+            >
+              participantes ({participants.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setChatOpen(true);
+                setParticipantsOpen(false);
+              }}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition ${chatOpen ? "bg-blue-700 text-white" : "border border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
+            >
+              chat {chatMessages.length > 0 ? `(${chatMessages.length})` : ""}
+            </button>
+          </div>
+
           <div className="grid w-full max-w-5xl grid-cols-1 gap-4 md:grid-cols-2">
             <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
               <video
@@ -256,7 +325,9 @@ export default function RoomPage() {
                   }}
                   className="h-full w-full object-cover"
                 />
-                <p className="absolute bottom-2 left-3 text-sm text-white/90">participante</p>
+                <p className="absolute bottom-2 left-3 text-sm text-white/90">
+                  {participants.find((participant) => participant.participantId === participantId)?.name ?? "participante"}
+                </p>
               </div>
             ))}
           </div>
@@ -286,6 +357,62 @@ export default function RoomPage() {
               sair da reuniao
             </button>
           </div>
+
+          {participantsOpen && (
+            <aside className="absolute right-4 bottom-40 top-28 flex w-80 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg">
+              <div className="border-b border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-900">participantes</div>
+              <div className="flex-1 overflow-y-auto px-4 py-3">
+                {participants.map((participant) => (
+                  <div key={participant.participantId} className="mb-3 flex items-center gap-2">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-700 text-xs font-medium text-white">
+                      {participant.name.charAt(0).toUpperCase()}
+                    </div>
+                    <span className="text-sm text-zinc-800">{participant.name}</span>
+                    {participant.participantId === selfId && (
+                      <span className="text-xs text-zinc-400">(voce)</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </aside>
+          )}
+
+          {chatOpen && (
+            <aside className="absolute right-4 bottom-40 top-28 flex w-80 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg">
+              <div className="border-b border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-900">chat</div>
+              <div className="flex-1 overflow-y-auto px-4 py-3">
+                {chatMessages.length === 0 && <p className="text-sm text-zinc-400">nenhuma mensagem ainda</p>}
+                {chatMessages.map((message, index) => (
+                  <div key={index} className="mb-2">
+                    <span className="text-xs font-medium text-zinc-500">{message.name}</span>
+                    <p className="text-sm text-zinc-800">{message.text}</p>
+                  </div>
+                ))}
+              </div>
+              <form
+                className="flex items-center gap-2 border-t border-zinc-200 p-3"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  sendChatMessage();
+                }}
+              >
+                <input
+                  type="text"
+                  value={chatText}
+                  onChange={(event) => setChatText(event.target.value)}
+                  placeholder="escreva uma mensagem"
+                  aria-label="mensagem do chat"
+                  className="flex-1 rounded-full border border-zinc-300 px-4 py-2 text-sm text-zinc-800 outline-none focus:border-blue-700"
+                />
+                <button
+                  type="submit"
+                  className="rounded-full bg-blue-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-800"
+                >
+                  enviar
+                </button>
+              </form>
+            </aside>
+          )}
         </main>
       </div>
     );

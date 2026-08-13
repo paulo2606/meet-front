@@ -47,6 +47,9 @@ export default function RoomPage() {
   const [chatOpen, setChatOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [sharingParticipantId, setSharingParticipantId] = useState<string | null>(null);
+  const [showAllCameras, setShowAllCameras] = useState(false);
+  const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
   const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -169,6 +172,11 @@ export default function RoomPage() {
       connection.on("PeerLeft", (participantId: string) => {
         removePeer(participantId);
         setParticipants((prev) => prev.filter((participant) => participant.participantId !== participantId));
+        setSharingParticipantId((current) => (current === participantId ? null : current));
+      });
+      connection.on("ScreenShare", (participantId: string, sharingActive: boolean) => {
+        setShowAllCameras(false);
+        setSharingParticipantId((current) => (sharingActive ? participantId : current === participantId ? null : current));
       });
       connection.on("Message", (participantId: string, name: string, text: string) => {
         setChatMessages((prev) => [...prev, { participantId, name, text }]);
@@ -217,6 +225,10 @@ export default function RoomPage() {
     setParticipants([]);
     setChatMessages([]);
     setChatOpen(false);
+    setSharing(false);
+    setSharingParticipantId(null);
+    setShowAllCameras(false);
+    setLocalScreenStream(null);
     setJoined(false);
     await hubRef.current?.stop();
     hubRef.current = null;
@@ -249,7 +261,11 @@ export default function RoomPage() {
         const sender = connection.getSenders().find((candidate) => candidate.track?.kind === "video");
         await sender?.replaceTrack(screenTrack);
       }
+      setShowAllCameras(false);
       setSharing(true);
+      setSharingParticipantId(participantIdRef.current);
+      setLocalScreenStream(screenStream);
+      hubRef.current?.invoke("ScreenShare", id, true).catch(() => undefined);
     } catch {
       setSharing(false);
     }
@@ -270,6 +286,9 @@ export default function RoomPage() {
     screenStreamRef.current = null;
     cameraTrackRef.current = null;
     setSharing(false);
+    setSharingParticipantId((current) => (current === participantIdRef.current ? null : current));
+    setLocalScreenStream(null);
+    hubRef.current?.invoke("ScreenShare", id, false).catch(() => undefined);
   }
 
   function toggleFullscreen() {
@@ -295,6 +314,21 @@ export default function RoomPage() {
   }
 
   const inviteUrl = meeting ? `${window.location.origin}/room/${meeting.id}` : "";
+
+  const screenStream =
+    sharing
+      ? localScreenStream
+      : sharingParticipantId
+        ? remoteStreams.find((remote) => remote.participantId === sharingParticipantId)?.stream ?? null
+        : null;
+  const sharerName = sharing
+    ? "minha tela"
+    : sharingParticipantId
+      ? participants.find((participant) => participant.participantId === sharingParticipantId)?.name ?? "participante"
+      : "tela";
+  const cameraStreams = remoteStreams.filter((remote) => remote.participantId !== sharingParticipantId);
+  const hiddenCameraCount = Math.max(0, 1 + cameraStreams.length - 3);
+  const visibleCameraStreams = showAllCameras ? cameraStreams : cameraStreams.slice(0, 2);
 
   async function handleCopy() {
     await navigator.clipboard.writeText(inviteUrl);
@@ -342,66 +376,115 @@ export default function RoomPage() {
             </button>
           </div>
 
-          <div className="grid w-full max-w-5xl grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
-            {sharing && (
+          {screenStream ? (
+            <div className="flex w-full max-w-6xl items-start gap-4">
+              <div className="flex w-56 shrink-0 flex-col gap-3">
+                <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
+                  <video
+                    autoPlay
+                    muted
+                    playsInline
+                    data-testid="local-video"
+                    ref={(el) => {
+                      localVideoRef.current = el;
+                      if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
+                        el.srcObject = localStreamRef.current;
+                      }
+                    }}
+                    className="h-full w-full object-cover"
+                  />
+                  {!cameraOn && <p className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">camera desativada</p>}
+                  <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
+                </div>
+                {visibleCameraStreams.map(({ participantId, stream }) => (
+                  <div key={participantId} className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
+                    <video
+                      autoPlay
+                      playsInline
+                      data-testid={`remote-video-${participantId}`}
+                      ref={(el) => {
+                        if (el && el.srcObject !== stream) {
+                          el.srcObject = stream;
+                        }
+                      }}
+                      className="h-full w-full object-cover"
+                    />
+                    <p className="absolute bottom-2 left-3 text-sm text-white/90">
+                      {participants.find((participant) => participant.participantId === participantId)?.name ?? "participante"}
+                    </p>
+                  </div>
+                ))}
+                {hiddenCameraCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllCameras((value) => !value)}
+                    className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
+                  >
+                    {showAllCameras ? "ver menos" : `ver mais (${hiddenCameraCount})`}
+                  </button>
+                )}
+              </div>
+              <div className="relative aspect-video flex-1 overflow-hidden rounded-2xl bg-zinc-900">
+                <video
+                  autoPlay
+                  muted={sharing}
+                  playsInline
+                  data-testid="screen-video"
+                  ref={(el) => {
+                    if (el && screenStream && el.srcObject !== screenStream) {
+                      el.srcObject = screenStream;
+                    }
+                  }}
+                  className="h-full w-full object-contain"
+                />
+                <p className="absolute bottom-2 left-3 text-sm text-white/90">{sharerName}</p>
+              </div>
+            </div>
+          ) : (
+            <div className="grid w-full max-w-5xl grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
               <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
                 <video
                   autoPlay
                   muted
                   playsInline
-                  data-testid="screen-video"
+                  data-testid="local-video"
                   ref={(el) => {
-                    if (el && screenStreamRef.current && el.srcObject !== screenStreamRef.current) {
-                      el.srcObject = screenStreamRef.current;
+                    localVideoRef.current = el;
+                    if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
+                      el.srcObject = localStreamRef.current;
                     }
                   }}
                   className="h-full w-full object-cover"
                 />
-                <p className="absolute bottom-2 left-3 text-sm text-white/90">minha tela</p>
+                {!cameraOn && <p className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">camera desativada</p>}
+                <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
               </div>
-            )}
-            <div className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
-              <video
-                autoPlay
-                muted
-                playsInline
-                data-testid="local-video"
-                ref={(el) => {
-                  localVideoRef.current = el;
-                  if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
-                    el.srcObject = localStreamRef.current;
-                  }
-                }}
-                className="h-full w-full object-cover"
-              />
-              {!cameraOn && <p className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">camera desativada</p>}
-              <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
-            </div>
 
-            {remoteStreams.length === 0 && (
-              <div className="flex aspect-video items-center justify-center rounded-2xl bg-zinc-100 text-sm text-zinc-500">
-                aguardando outros participantes
-              </div>
-            )}
-            {remoteStreams.map(({ participantId, stream }) => (
-              <div key={participantId} className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
-                <video
-                  autoPlay
-                  playsInline
-                  data-testid={`remote-video-${participantId}`}
-                  ref={(el) => {
-                    if (el && el.srcObject !== stream) {
-                      el.srcObject = stream;
-                    }
-                  }}
-                  className="h-full w-full object-cover"
-                />
-                <p className="absolute bottom-2 left-3 text-sm text-white/90">
-                  {participants.find((participant) => participant.participantId === participantId)?.name ?? "participante"}
-                </p>
-              </div>
-            ))}
-          </div>
+              {remoteStreams.length === 0 && (
+                <div className="flex aspect-video items-center justify-center rounded-2xl bg-zinc-100 text-sm text-zinc-500">
+                  aguardando outros participantes
+                </div>
+              )}
+              {remoteStreams.map(({ participantId, stream }) => (
+                <div key={participantId} className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
+                  <video
+                    autoPlay
+                    playsInline
+                    data-testid={`remote-video-${participantId}`}
+                    ref={(el) => {
+                      if (el && el.srcObject !== stream) {
+                        el.srcObject = stream;
+                      }
+                    }}
+                    className="h-full w-full object-cover"
+                  />
+                  <p className="absolute bottom-2 left-3 text-sm text-white/90">
+                    {participants.find((participant) => participant.participantId === participantId)?.name ?? "participante"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="flex items-center gap-3">
             <button

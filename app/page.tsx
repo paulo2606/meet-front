@@ -2,14 +2,34 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { useAuth } from "@/components/auth-context";
 import { CameraIcon, PlusIcon } from "@/components/logo";
+import type { MeetingResponse } from "@/lib/api";
 
 const HERO_IMAGE =
   "https://images.pexels.com/photos/4226140/pexels-photo-4226140.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2";
 
 export default function Home() {
-  const { user, isLoading, logout } = useAuth();
+  const { user, isLoading, logout, authRequest } = useAuth();
+  const router = useRouter();
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleCreateMeeting() {
+    setCreating(true);
+    setError("");
+    try {
+      const meeting = await authRequest<MeetingResponse>("/api/meetings", {
+        method: "POST",
+      });
+      router.push(`/room/${meeting.id}`);
+    } catch {
+      setError("nao foi possivel criar a reuniao, tente novamente");
+      setCreating(false);
+    }
+  }
 
   return (
     <div className="flex flex-1 flex-col">
@@ -56,11 +76,12 @@ export default function Home() {
               <>
                 <button
                   type="button"
-                  disabled
-                  className="flex cursor-not-allowed items-center gap-2 rounded-full bg-blue-700 px-6 py-3 text-sm font-medium text-white opacity-50"
+                  onClick={handleCreateMeeting}
+                  disabled={creating}
+                  className="flex items-center gap-2 rounded-full bg-blue-700 px-6 py-3 text-sm font-medium text-white transition hover:bg-blue-800 disabled:opacity-50"
                 >
                   <PlusIcon className="h-5 w-5" />
-                  nova reunião
+                  {creating ? "criando..." : "nova reunião"}
                 </button>
                 <p className="text-sm text-zinc-500">
                   conectado como {user.email}
@@ -83,6 +104,7 @@ export default function Home() {
               </>
             )}
           </div>
+          {error && <p className="text-sm text-red-600">{error}</p>}
         </div>
         <div className="w-full max-w-lg">
           <div className="overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-xl shadow-zinc-200/60">

@@ -4,6 +4,13 @@ export type AuthUser = {
   email: string;
 };
 
+export type MeetingResponse = {
+  id: string;
+  code: string;
+  createdAtUtc: string;
+  hostName: string;
+};
+
 export type TokenResponse = AuthUser & {
   accessToken: string;
   expiresAtUtc: string;

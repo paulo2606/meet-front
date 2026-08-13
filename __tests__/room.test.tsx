@@ -168,6 +168,16 @@ const fakeScreenStream = {
   getAudioTracks: () => [],
   getVideoTracks: () => [screenTrack],
 };
+
+function makeRemoteStream() {
+  return { getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] } as unknown as MediaStream;
+}
+
+function addPeerWithStream(connection: { trigger: (name: string, ...args: unknown[]) => void }, participantId: string, name: string) {
+  connection.trigger("PeerJoined", participantId, name);
+  const peer = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1];
+  peer.ontrack?.({ streams: [makeRemoteStream()] });
+}
 const getUserMediaMock = vi.fn();
 const getDisplayMediaMock = vi.fn();
 const requestFullscreenMock = vi.fn();
@@ -387,6 +397,7 @@ describe("RoomPage WebRTC", () => {
     expect(await screen.findByTestId("screen-video")).toBeInTheDocument();
     expect(screen.getByTestId("local-video")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /parar de compartilhar a tela/ })).toBeInTheDocument();
+    expect(fakeConnections[0].invokes.some((i) => i.method === "ScreenShare" && i.args[0] === "meeting-1" && i.args[1] === true)).toBe(true);
   });
 
   it("para de compartilhar a tela e restaura a camera", async () => {
@@ -409,6 +420,63 @@ describe("RoomPage WebRTC", () => {
     await waitFor(() => expect(screen.queryByTestId("screen-video")).not.toBeInTheDocument());
     expect(screen.getByTestId("local-video")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /compartilhar tela/ })).toBeInTheDocument();
+    expect(fakeConnections[0].invokes.some((i) => i.method === "ScreenShare" && i.args[0] === "meeting-1" && i.args[1] === false)).toBe(true);
+  });
+
+  it("mostra tela compartilhada de participante remoto em destaque", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    addPeerWithStream(connection, "peer-1", "Bruno");
+    connection.trigger("ScreenShare", "peer-1", true);
+
+    expect(await screen.findByTestId("screen-video")).toBeInTheDocument();
+    expect(screen.getByTestId("local-video")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-video-peer-1")).not.toBeInTheDocument();
+  });
+
+  it("limita as cameras a 3 e mostra o botao ver mais", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    addPeerWithStream(connection, "peer-1", "Bruno");
+    addPeerWithStream(connection, "peer-2", "Carla");
+    addPeerWithStream(connection, "peer-3", "Davi");
+    addPeerWithStream(connection, "peer-4", "Eva");
+    connection.trigger("ScreenShare", "peer-1", true);
+
+    expect(await screen.findByTestId("screen-video")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-video-peer-2")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-video-peer-3")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-video-peer-4")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /ver mais/ }));
+
+    expect(screen.getByTestId("remote-video-peer-4")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /ver menos/ })).toBeInTheDocument();
+  });
+
+  it("volta ao grid quando o compartilhamento remoto para", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    addPeerWithStream(connection, "peer-1", "Bruno");
+    connection.trigger("ScreenShare", "peer-1", true);
+    await screen.findByTestId("screen-video");
+
+    connection.trigger("ScreenShare", "peer-1", false);
+
+    await waitFor(() => expect(screen.queryByTestId("screen-video")).not.toBeInTheDocument());
+    expect(screen.getByTestId("remote-video-peer-1")).toBeInTheDocument();
   });
 
   it("alterna a tela cheia", async () => {

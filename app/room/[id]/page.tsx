@@ -224,6 +224,8 @@ export default function RoomPage() {
     connectionsRef.current.clear();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
+    mockStreamsRef.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
+    mockStreamsRef.current = [];
     setRemoteStreams([]);
     setParticipants([]);
     setChatMessages([]);
@@ -318,12 +320,15 @@ export default function RoomPage() {
 
   const inviteUrl = meeting ? `${window.location.origin}/room/${meeting.id}` : "";
 
-  function addMockCameras() {
+  const addMockCameras = useCallback(() => {
+    const guardCanvas = document.createElement("canvas");
+    if (typeof guardCanvas.captureStream !== "function" || mockStreamsRef.current.length > 0) {
+      return;
+    }
     const colors = ["#3b82f6", "#ef4444", "#22c55e", "#a855f7", "#f59e0b"];
-    const start = mockStreamsRef.current.length;
     const newStreams: RemoteStream[] = [];
     const newParticipants: Participant[] = [];
-    for (let index = start; index < start + 10; index++) {
+    for (let index = 0; index < 10; index++) {
       const canvas = document.createElement("canvas");
       canvas.width = 320;
       canvas.height = 180;
@@ -343,15 +348,13 @@ export default function RoomPage() {
     }
     setRemoteStreams((prev) => [...prev, ...newStreams]);
     setParticipants((prev) => [...prev, ...newParticipants]);
-  }
+  }, []);
 
-  function removeMockCameras() {
-    mockStreamsRef.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
-    mockStreamsRef.current = [];
-    setRemoteStreams((prev) => prev.filter((remote) => !remote.participantId.startsWith("mock-")));
-    setParticipants((prev) => prev.filter((participant) => !participant.participantId.startsWith("mock-")));
-    setSharingParticipantId((current) => (current?.startsWith("mock-") ? null : current));
-  }
+  useEffect(() => {
+    if (joined) {
+      addMockCameras();
+    }
+  }, [joined, addMockCameras]);
 
   const screenStream =
     sharing
@@ -396,8 +399,8 @@ export default function RoomPage() {
 
   if (joined) {
     return (
-      <div className="flex flex-1 flex-col">
-        <header className="flex items-center justify-between px-6 py-4">
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <header className="flex shrink-0 items-center justify-between px-6 py-4">
           <Link href="/" className="flex items-center gap-3">
             <CameraIcon className="h-8 w-8 text-blue-700" />
             <span className="text-xl font-medium text-zinc-900">Meet</span>
@@ -410,8 +413,8 @@ export default function RoomPage() {
           </div>
         </header>
 
-        <main className="relative flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-8">
-          <div className="flex w-full max-w-5xl items-center justify-end gap-2">
+        <main className="relative flex min-h-0 flex-1 flex-col px-6 pb-3">
+          <div className="flex w-full max-w-5xl shrink-0 items-center justify-end gap-2 pt-3">
             <button
               type="button"
               onClick={() => {
@@ -434,10 +437,23 @@ export default function RoomPage() {
             </button>
           </div>
 
-          {screenStream ? (
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 overflow-hidden">
+            {screenStream ? (
             showAllCameras ? (
               <>
-                <div className="grid w-full max-w-5xl grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
+                <div className="flex w-full max-w-5xl items-center justify-center gap-3">
+                  {featuredTotalPages > 1 && (
+                    <button
+                      type="button"
+                      aria-label="pagina anterior"
+                      disabled={featuredCurrentPage === 0}
+                      onClick={() => setCameraPage((page) => Math.max(0, page - 1))}
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-sm transition ${featuredCurrentPage === 0 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
+                    >
+                      ←
+                    </button>
+                  )}
+                  <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
                   {featuredPageTiles.map((tile) =>
                     tile.kind === "screen" ? (
                       <div key={tile.key} className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
@@ -492,29 +508,23 @@ export default function RoomPage() {
                       </div>
                     ),
                   )}
-                </div>
-                {featuredTotalPages > 1 && (
-                  <div className="flex items-center gap-3">
+                  </div>
+                  {featuredTotalPages > 1 && (
                     <button
                       type="button"
-                      disabled={featuredCurrentPage === 0}
-                      onClick={() => setCameraPage((page) => Math.max(0, page - 1))}
-                      className={`rounded-full border px-4 py-2 text-sm font-medium transition ${featuredCurrentPage === 0 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
-                    >
-                      anterior
-                    </button>
-                    <span className="text-sm text-zinc-600">
-                      {featuredCurrentPage + 1} / {featuredTotalPages}
-                    </span>
-                    <button
-                      type="button"
+                      aria-label="proxima pagina"
                       disabled={featuredCurrentPage >= featuredTotalPages - 1}
                       onClick={() => setCameraPage((page) => page + 1)}
-                      className={`rounded-full border px-4 py-2 text-sm font-medium transition ${featuredCurrentPage >= featuredTotalPages - 1 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-sm transition ${featuredCurrentPage >= featuredTotalPages - 1 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
                     >
-                      proxima
+                      →
                     </button>
-                  </div>
+                  )}
+                </div>
+                {featuredTotalPages > 1 && (
+                  <span className="min-w-[3rem] text-center text-sm text-zinc-600">
+                    {featuredCurrentPage + 1} / {featuredTotalPages}
+                  </span>
                 )}
                 <button
                   type="button"
@@ -592,7 +602,19 @@ export default function RoomPage() {
             )
           ) : (
             <>
-              <div className="grid w-full max-w-5xl grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
+              <div className="flex w-full max-w-5xl items-center justify-center gap-3">
+                {totalPages > 1 && (
+                  <button
+                    type="button"
+                    aria-label="pagina anterior"
+                    disabled={currentPage === 0}
+                    onClick={() => setCameraPage((page) => Math.max(0, page - 1))}
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-sm transition ${currentPage === 0 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
+                  >
+                    ←
+                  </button>
+                )}
+                <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
                 {pageTiles.map((tile) =>
                   tile.kind === "local" ? (
                     <div key={tile.key} className="relative aspect-video overflow-hidden rounded-2xl bg-zinc-900">
@@ -636,53 +658,29 @@ export default function RoomPage() {
                     aguardando outros participantes
                   </div>
                 )}
-              </div>
-              {totalPages > 1 && (
-                <div className="flex items-center gap-3">
+                </div>
+                {totalPages > 1 && (
                   <button
                     type="button"
-                    disabled={currentPage === 0}
-                    onClick={() => setCameraPage((page) => Math.max(0, page - 1))}
-                    className={`rounded-full border px-4 py-2 text-sm font-medium transition ${currentPage === 0 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
-                  >
-                    anterior
-                  </button>
-                  <span className="text-sm text-zinc-600">
-                    {currentPage + 1} / {totalPages}
-                  </span>
-                  <button
-                    type="button"
+                    aria-label="proxima pagina"
                     disabled={currentPage >= totalPages - 1}
                     onClick={() => setCameraPage((page) => page + 1)}
-                    className={`rounded-full border px-4 py-2 text-sm font-medium transition ${currentPage >= totalPages - 1 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-sm transition ${currentPage >= totalPages - 1 ? "cursor-not-allowed border-zinc-200 text-zinc-400" : "border-zinc-300 text-zinc-700 hover:bg-zinc-100"}`}
                   >
-                    proxima
+                    →
                   </button>
-                </div>
+                )}
+              </div>
+              {totalPages > 1 && (
+                <span className="min-w-[3rem] text-center text-sm text-zinc-600">
+                  {currentPage + 1} / {totalPages}
+                </span>
               )}
             </>
           )}
+          </div>
 
-          {process.env.NODE_ENV !== "production" && (
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={addMockCameras}
-                className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
-              >
-                adicionar mock
-              </button>
-              <button
-                type="button"
-                onClick={removeMockCameras}
-                className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100"
-              >
-                remover mock
-              </button>
-            </div>
-          )}
-
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center justify-center gap-3 pb-4 pt-3">
             <button
               type="button"
               onClick={toggleMic}

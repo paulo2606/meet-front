@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
 import { useAuth } from "@/components/auth-context";
+import { Avatar } from "@/components/avatar";
 import {
   CameraIcon,
   CameraOffIcon,
@@ -39,6 +40,7 @@ type RemoteStream = {
 type Participant = {
   participantId: string;
   name: string;
+  photoUrl: string | null;
 };
 
 type ChatMessage = {
@@ -46,6 +48,86 @@ type ChatMessage = {
   name: string;
   text: string;
 };
+
+type LocalTileProps = {
+  name: string;
+  photoUrl: string | null | undefined;
+  cameraOn: boolean;
+  onVideoReady: (el: HTMLVideoElement | null) => void;
+};
+
+function LocalTile({ name, photoUrl, cameraOn, onVideoReady }: LocalTileProps) {
+  if (!cameraOn) {
+    return (
+      <div
+        className="relative aspect-video overflow-hidden rounded-box bg-room-tile ring-1 ring-room-line"
+        data-testid="local-photo"
+      >
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="h-24 w-24 overflow-hidden rounded-full ring-4 ring-room-line">
+            <Avatar photoUrl={photoUrl} name={name} />
+          </div>
+        </div>
+        <p className="absolute bottom-2 left-3 text-sm text-white/90">{name}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
+      <video
+        autoPlay
+        muted
+        playsInline
+        data-testid="local-video"
+        ref={onVideoReady}
+        className="h-full w-full object-cover"
+      />
+      <p className="absolute bottom-2 left-3 text-sm text-white/90">{name}</p>
+    </div>
+  );
+}
+
+type RemoteTileProps = {
+  participantId: string;
+  stream: MediaStream;
+  name: string;
+  photoUrl: string | null | undefined;
+  cameraOff: boolean;
+};
+
+function RemoteTile({ participantId, stream, name, photoUrl, cameraOff }: RemoteTileProps) {
+  if (cameraOff) {
+    return (
+      <div
+        className="relative aspect-video overflow-hidden rounded-box bg-room-tile ring-1 ring-room-line"
+        data-testid={`remote-photo-${participantId}`}
+      >
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="h-24 w-24 overflow-hidden rounded-full ring-4 ring-room-line">
+            <Avatar photoUrl={photoUrl} name={name} />
+          </div>
+        </div>
+        <p className="absolute bottom-2 left-3 text-sm text-white/90">{name}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
+      <video
+        autoPlay
+        playsInline
+        data-testid={`remote-video-${participantId}`}
+        ref={(el) => {
+          if (el && el.srcObject !== stream) {
+            el.srcObject = stream;
+          }
+        }}
+        className="h-full w-full object-cover"
+      />
+      <p className="absolute bottom-2 left-3 text-sm text-white/90">{name}</p>
+    </div>
+  );
+}
 
 export default function RoomPage() {
   const { id } = useParams<{ id: string }>();
@@ -60,6 +142,7 @@ export default function RoomPage() {
   const [cameraOn, setCameraOn] = useState(true);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
   const [participants, setParticipants] = useState<Participant[]>([]);
+  const [camerasOff, setCamerasOff] = useState<Record<string, boolean>>({});
   const [selfId, setSelfId] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
@@ -171,7 +254,8 @@ export default function RoomPage() {
       participantIdRef.current = newParticipantId();
       setSelfId(participantIdRef.current);
       const selfName = user?.name ?? "Convidado";
-      setParticipants([{ participantId: participantIdRef.current, name: selfName }]);
+      const selfPhotoUrl = user?.photoUrl ?? null;
+      setParticipants([{ participantId: participantIdRef.current, name: selfName, photoUrl: selfPhotoUrl }]);
 
       const addParticipant = (participant: Participant) => {
         setParticipants((prev) =>
@@ -181,18 +265,26 @@ export default function RoomPage() {
 
       connection.on("Peers", (peers: Participant[]) => {
         peers.forEach((peer) => {
-          addParticipant(peer);
+          addParticipant({ ...peer, photoUrl: peer.photoUrl ?? null });
           createPeer(peer.participantId, true);
         });
       });
-      connection.on("PeerJoined", (participantId: string, name: string) => {
-        addParticipant({ participantId, name });
+      connection.on("PeerJoined", (participantId: string, name: string, photoUrl?: string | null) => {
+        addParticipant({ participantId, name, photoUrl: photoUrl ?? null });
         createPeer(participantId, false);
       });
       connection.on("PeerLeft", (participantId: string) => {
         removePeer(participantId);
         setParticipants((prev) => prev.filter((participant) => participant.participantId !== participantId));
+        setCamerasOff((prev) => {
+          const next = { ...prev };
+          delete next[participantId];
+          return next;
+        });
         setSharingParticipantId((current) => (current === participantId ? null : current));
+      });
+      connection.on("CameraState", (participantId: string, on: boolean) => {
+        setCamerasOff((prev) => ({ ...prev, [participantId]: !on }));
       });
       connection.on("ScreenShare", (participantId: string, sharingActive: boolean) => {
         setShowAllCameras(false);
@@ -222,7 +314,7 @@ export default function RoomPage() {
       });
 
       await connection.start();
-      await connection.invoke("Join", id, participantIdRef.current, selfName);
+      await connection.invoke("Join", id, participantIdRef.current, selfName, selfPhotoUrl);
       setJoined(true);
     } catch {
       setError("nao foi possivel entrar na reuniao");
@@ -245,6 +337,7 @@ export default function RoomPage() {
     mockStreamsRef.current = [];
     setRemoteStreams([]);
     setParticipants([]);
+    setCamerasOff({});
     setChatMessages([]);
     setChatOpen(false);
     setSharing(false);
@@ -329,10 +422,12 @@ export default function RoomPage() {
   }
 
   function toggleCamera() {
+    const next = !cameraOn;
     localStreamRef.current?.getVideoTracks().forEach((track) => {
-      track.enabled = !track.enabled;
+      track.enabled = next;
     });
-    setCameraOn((value) => !value);
+    setCameraOn(next);
+    hubRef.current?.invoke("CameraState", id, next).catch(() => undefined);
   }
 
   const inviteUrl = meeting ? `${window.location.origin}/room/${meeting.id}` : "";
@@ -361,7 +456,7 @@ export default function RoomPage() {
       const stream = canvas.captureStream(5);
       mockStreamsRef.current.push(stream);
       newStreams.push({ participantId: `mock-${index + 1}`, stream });
-      newParticipants.push({ participantId: `mock-${index + 1}`, name });
+      newParticipants.push({ participantId: `mock-${index + 1}`, name, photoUrl: null });
     }
     setRemoteStreams((prev) => [...prev, ...newStreams]);
     setParticipants((prev) => [...prev, ...newParticipants]);
@@ -440,8 +535,8 @@ export default function RoomPage() {
         <header className="flex shrink-0 items-center justify-between border-b border-room-line px-6 py-4">
           <Logo />
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-sm font-medium text-white">
-              {(user?.name ?? "Convidado").charAt(0).toUpperCase()}
+            <div className="h-9 w-9 overflow-hidden rounded-full bg-accent">
+              <Avatar photoUrl={user?.photoUrl} name={user?.name ?? "Convidado"} />
             </div>
             <span className="text-sm text-room-ink-2">{user?.name ?? "Convidado"}</span>
           </div>
@@ -513,44 +608,28 @@ export default function RoomPage() {
                         <p className="absolute bottom-2 left-3 text-sm text-white/90">{sharerName}</p>
                       </div>
                     ) : tile.kind === "local" ? (
-                      <div key={tile.key} className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
-                        <video
-                          autoPlay
-                          muted
-                          playsInline
-                          data-testid="local-video"
-                          ref={(el) => {
+                      <div key={tile.key}>
+                        <LocalTile
+                          name={user?.name ?? "Convidado"}
+                          photoUrl={user?.photoUrl}
+                          cameraOn={cameraOn}
+                          onVideoReady={(el) => {
                             localVideoRef.current = el;
                             if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
                               el.srcObject = localStreamRef.current;
                             }
                           }}
-                          className="h-full w-full object-cover"
                         />
-                        {!cameraOn && (
-                          <p className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-room-ink-3">
-                            <CameraOffIcon className="h-5 w-5" />
-                            camera desativada
-                          </p>
-                        )}
-                        <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
                       </div>
                     ) : (
-                      <div key={tile.key} className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
-                        <video
-                          autoPlay
-                          playsInline
-                          data-testid={`remote-video-${tile.key}`}
-                          ref={(el) => {
-                            if (el && el.srcObject !== tile.stream) {
-                              el.srcObject = tile.stream;
-                            }
-                          }}
-                          className="h-full w-full object-cover"
+                      <div key={tile.key}>
+                        <RemoteTile
+                          participantId={tile.key}
+                          stream={tile.stream}
+                          name={participants.find((participant) => participant.participantId === tile.key)?.name ?? "participante"}
+                          photoUrl={participants.find((participant) => participant.participantId === tile.key)?.photoUrl}
+                          cameraOff={camerasOff[tile.key] ?? false}
                         />
-                        <p className="absolute bottom-2 left-3 text-sm text-white/90">
-                          {participants.find((participant) => participant.participantId === tile.key)?.name ?? "participante"}
-                        </p>
                       </div>
                     ),
                   )}
@@ -583,44 +662,26 @@ export default function RoomPage() {
             ) : (
               <div className="flex w-full max-w-6xl items-start gap-4">
                 <div className="flex w-56 shrink-0 flex-col gap-3">
-                  <div className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
-                    <video
-                      autoPlay
-                      muted
-                      playsInline
-                      data-testid="local-video"
-                      ref={(el) => {
-                        localVideoRef.current = el;
-                        if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
-                          el.srcObject = localStreamRef.current;
-                        }
-                      }}
-                      className="h-full w-full object-cover"
-                    />
-                    {!cameraOn && (
-                      <p className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-room-ink-3">
-                        <CameraOffIcon className="h-5 w-5" />
-                        camera desativada
-                      </p>
-                    )}
-                    <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
-                  </div>
+                  <LocalTile
+                    name={user?.name ?? "Convidado"}
+                    photoUrl={user?.photoUrl}
+                    cameraOn={cameraOn}
+                    onVideoReady={(el) => {
+                      localVideoRef.current = el;
+                      if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
+                        el.srcObject = localStreamRef.current;
+                      }
+                    }}
+                  />
                   {visibleCameraStreams.map(({ participantId, stream }) => (
-                    <div key={participantId} className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
-                      <video
-                        autoPlay
-                        playsInline
-                        data-testid={`remote-video-${participantId}`}
-                        ref={(el) => {
-                          if (el && el.srcObject !== stream) {
-                            el.srcObject = stream;
-                          }
-                        }}
-                        className="h-full w-full object-cover"
+                    <div key={participantId}>
+                      <RemoteTile
+                        participantId={participantId}
+                        stream={stream}
+                        name={participants.find((participant) => participant.participantId === participantId)?.name ?? "participante"}
+                        photoUrl={participants.find((participant) => participant.participantId === participantId)?.photoUrl}
+                        cameraOff={camerasOff[participantId] ?? false}
                       />
-                      <p className="absolute bottom-2 left-3 text-sm text-white/90">
-                        {participants.find((participant) => participant.participantId === participantId)?.name ?? "participante"}
-                      </p>
                     </div>
                   ))}
                   {hiddenCameraCount > 0 && (
@@ -668,44 +729,28 @@ export default function RoomPage() {
                 <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
                 {pageTiles.map((tile) =>
                   tile.kind === "local" ? (
-                    <div key={tile.key} className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
-                      <video
-                        autoPlay
-                        muted
-                        playsInline
-                        data-testid="local-video"
-                        ref={(el) => {
+                    <div key={tile.key}>
+                      <LocalTile
+                        name={user?.name ?? "Convidado"}
+                        photoUrl={user?.photoUrl}
+                        cameraOn={cameraOn}
+                        onVideoReady={(el) => {
                           localVideoRef.current = el;
                           if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
                             el.srcObject = localStreamRef.current;
                           }
                         }}
-                        className="h-full w-full object-cover"
                       />
-                      {!cameraOn && (
-                        <p className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-room-ink-3">
-                          <CameraOffIcon className="h-5 w-5" />
-                          camera desativada
-                        </p>
-                      )}
-                      <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
                     </div>
                   ) : (
-                    <div key={tile.key} className="relative aspect-video overflow-hidden rounded-box bg-black ring-1 ring-room-line">
-                      <video
-                        autoPlay
-                        playsInline
-                        data-testid={`remote-video-${tile.key}`}
-                        ref={(el) => {
-                          if (el && el.srcObject !== tile.stream) {
-                            el.srcObject = tile.stream;
-                          }
-                        }}
-                        className="h-full w-full object-cover"
+                    <div key={tile.key}>
+                      <RemoteTile
+                        participantId={tile.key}
+                        stream={tile.stream}
+                        name={participants.find((participant) => participant.participantId === tile.key)?.name ?? "participante"}
+                        photoUrl={participants.find((participant) => participant.participantId === tile.key)?.photoUrl}
+                        cameraOff={camerasOff[tile.key] ?? false}
                       />
-                      <p className="absolute bottom-2 left-3 text-sm text-white/90">
-                        {participants.find((participant) => participant.participantId === tile.key)?.name ?? "participante"}
-                      </p>
                     </div>
                   ),
                 )}
@@ -798,8 +843,8 @@ export default function RoomPage() {
               <div className="flex-1 overflow-y-auto px-4 py-3">
                 {participants.map((participant) => (
                   <div key={participant.participantId} className="mb-3 flex items-center gap-2">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-xs font-medium text-white">
-                      {participant.name.charAt(0).toUpperCase()}
+                    <div className="h-8 w-8 shrink-0 overflow-hidden rounded-full bg-accent">
+                      <Avatar photoUrl={participant.photoUrl} name={participant.name} />
                     </div>
                     <span className="text-sm text-room-ink">{participant.name}</span>
                     {participant.participantId === selfId && (
@@ -869,8 +914,8 @@ export default function RoomPage() {
         <Logo />
         {user && (
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-sm font-medium text-white">
-              {user.name.charAt(0).toUpperCase()}
+            <div className="h-9 w-9 overflow-hidden rounded-full bg-accent">
+              <Avatar photoUrl={user.photoUrl} name={user.name} />
             </div>
             <span className="text-sm text-ink-2">{user.name}</span>
           </div>

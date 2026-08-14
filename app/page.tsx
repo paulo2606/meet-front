@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useAuth } from "@/components/auth-context";
+import { Avatar } from "@/components/avatar";
 import { Logo, PlusIcon } from "@/components/logo";
 import type { MeetingResponse } from "@/lib/api";
 
@@ -94,9 +95,13 @@ export default function Home() {
         {!isLoading &&
           (user ? (
             <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-sm font-medium text-white">
-                {user.name.charAt(0).toUpperCase()}
-              </div>
+              <Link
+                href="/conta"
+                aria-label="minha conta"
+                className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-accent text-sm font-medium text-white transition hover:opacity-80"
+              >
+                <Avatar photoUrl={user.photoUrl} name={user.name} />
+              </Link>
               <button
                 type="button"
                 onClick={() => logout()}

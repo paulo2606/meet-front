@@ -14,6 +14,7 @@ type AuthContextValue = {
   register: (name: string, email: string, password: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  updatePhoto: (photoUrl: string) => void;
   authRequest: <T>(path: string, init?: RequestInit) => Promise<T>;
 };
 
@@ -32,6 +33,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         userId: token.userId,
         name: token.name,
         email: token.email,
+        photoUrl: token.photoUrl ?? null,
       },
     };
     tokenRef.current = token.accessToken;
@@ -108,6 +110,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [refreshSession],
   );
 
+  const updatePhoto = useCallback((photoUrl: string) => {
+    setSession((current) =>
+      current ? { ...current, user: { ...current.user, photoUrl } } : current,
+    );
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user: session?.user ?? null,
@@ -115,9 +123,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       login,
       register,
       logout,
+      updatePhoto,
       authRequest,
     }),
-    [session, isLoading, login, register, logout, authRequest],
+    [session, isLoading, login, register, logout, updatePhoto, authRequest],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

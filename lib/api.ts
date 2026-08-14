@@ -2,6 +2,7 @@ export type AuthUser = {
   userId: string;
   name: string;
   email: string;
+  photoUrl: string | null;
 };
 
 export type MeetingResponse = {
@@ -27,6 +28,13 @@ export class ApiError extends Error {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
 
+export function resolvePhotoUrl(photoUrl: string | null | undefined): string | null {
+  if (!photoUrl) {
+    return null;
+  }
+  return photoUrl.startsWith("/") ? `${API_URL}${photoUrl}` : photoUrl;
+}
+
 async function readMessage(response: Response): Promise<string> {
   const body = await response.json().catch(() => null);
   if (body && typeof body.message === "string") {
@@ -40,7 +48,7 @@ async function readMessage(response: Response): Promise<string> {
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}, token?: string | null): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body !== undefined && !headers.has("Content-Type")) {
+  if (init.body !== undefined && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   if (token) {

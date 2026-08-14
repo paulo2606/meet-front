@@ -181,6 +181,7 @@ function addPeerWithStream(connection: { trigger: (name: string, ...args: unknow
 }
 const getUserMediaMock = vi.fn();
 const getDisplayMediaMock = vi.fn();
+const enumerateDevicesMock = vi.fn();
 const requestFullscreenMock = vi.fn();
 const exitFullscreenMock = vi.fn();
 
@@ -206,10 +207,16 @@ describe("RoomPage WebRTC", () => {
     getUserMediaMock.mockResolvedValue(fakeStream);
     getDisplayMediaMock.mockReset();
     getDisplayMediaMock.mockResolvedValue(fakeScreenStream);
+    enumerateDevicesMock.mockReset();
+    enumerateDevicesMock.mockResolvedValue([
+      { kind: "audioinput", deviceId: "mic-1", label: "microfone padrão" },
+      { kind: "videoinput", deviceId: "cam-1", label: "câmera padrão" },
+    ]);
     Object.defineProperty(navigator, "mediaDevices", {
       value: {
         getUserMedia: getUserMediaMock,
         getDisplayMedia: getDisplayMediaMock,
+        enumerateDevices: enumerateDevicesMock,
       },
       configurable: true,
     });
@@ -246,6 +253,100 @@ describe("RoomPage WebRTC", () => {
     expect(fakeConnections).toHaveLength(1);
     expect(fakeConnections[0].started).toBe(true);
     expect(fakeConnections[0].invokes.some((i) => i.method === "Join" && i.args[0] === "meeting-1" && i.args[1] === "participant-1" && i.args[2] === "Paulo" && i.args[3] === "/avatars/1.svg")).toBe(true);
+  });
+
+  it("mostra preview de camera e mic antes de entrar", async () => {
+    render(<RoomPage />);
+
+    await screen.findByTestId("preview-video");
+    expect(getUserMediaMock).toHaveBeenCalledWith({ video: true, audio: true });
+    expect(screen.getByRole("meter", { name: "nível do microfone" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /desligar camera no preview/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /desligar microfone no preview/ })).toBeInTheDocument();
+  });
+
+  it("mostra os dispositivos de microfone e camera no preview", async () => {
+    enumerateDevicesMock.mockResolvedValue([
+      { kind: "audioinput", deviceId: "mic-1", label: "microfone padrão" },
+      { kind: "videoinput", deviceId: "cam-1", label: "câmera padrão" },
+      { kind: "audioinput", deviceId: "mic-2", label: "microfone usb" },
+      { kind: "videoinput", deviceId: "cam-2", label: "câmera usb" },
+    ]);
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    expect(enumerateDevicesMock).toHaveBeenCalled();
+    expect(screen.getByLabelText("microfone do preview")).toBeInTheDocument();
+    expect(screen.getByLabelText("câmera do preview")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "microfone padrão" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "câmera usb" })).toBeInTheDocument();
+  });
+
+  it("trocar de camera no preview refaz o stream com o dispositivo escolhido", async () => {
+    enumerateDevicesMock.mockResolvedValue([
+      { kind: "videoinput", deviceId: "cam-1", label: "câmera padrão" },
+      { kind: "videoinput", deviceId: "cam-2", label: "câmera usb" },
+    ]);
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+    getUserMediaMock.mockClear();
+    getUserMediaMock.mockResolvedValue(fakeStream);
+
+    fireEvent.change(screen.getByLabelText("câmera do preview"), { target: { value: "cam-2" } });
+
+    await waitFor(() =>
+      expect(getUserMediaMock).toHaveBeenCalledWith({ video: { deviceId: { exact: "cam-2" } }, audio: true })
+    );
+  });
+
+  it("trocar de microfone no preview refaz o stream com o dispositivo escolhido", async () => {
+    enumerateDevicesMock.mockResolvedValue([
+      { kind: "audioinput", deviceId: "mic-1", label: "microfone padrão" },
+      { kind: "audioinput", deviceId: "mic-2", label: "microfone usb" },
+    ]);
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+    getUserMediaMock.mockClear();
+
+    fireEvent.change(screen.getByLabelText("microfone do preview"), { target: { value: "mic-2" } });
+
+    await waitFor(() =>
+      expect(getUserMediaMock).toHaveBeenCalledWith({ video: true, audio: { deviceId: { exact: "mic-2" } } })
+    );
+  });
+
+  it("ajustes do preview valem ao entrar na sala", async () => {
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /desligar camera no preview/ }));
+    fireEvent.click(screen.getByRole("button", { name: /desligar microfone no preview/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+
+    await waitFor(() => expect(screen.getByTestId("local-photo")).toBeInTheDocument());
+    expect(getUserMediaMock).toHaveBeenCalledTimes(1);
+    expect(videoTrack.enabled).toBe(false);
+    expect(audioTrack.enabled).toBe(false);
+    expect(fakeConnections[0].invokes.some((i) => i.method === "CameraState" && i.args[0] === "meeting-1" && i.args[1] === false)).toBe(true);
+    expect(screen.getByRole("button", { name: /ligar camera/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /ligar microfone/ })).toBeInTheDocument();
+  });
+
+  it("reinicia o preview apos sair da reuniao", async () => {
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /sair da reuniao/ }));
+
+    await waitFor(() => expect(screen.getByTestId("preview-video")).toBeInTheDocument());
+    expect(getUserMediaMock).toHaveBeenCalledTimes(2);
   });
 
   it("com outros participantes na sala, envia offer de video para cada um", async () => {
@@ -324,15 +425,18 @@ describe("RoomPage WebRTC", () => {
     expect(screen.getByRole("button", { name: /entrar na reuniao/ })).toBeInTheDocument();
   });
 
-  it("mostra erro quando a permissao de camera/mic falha", async () => {
+  it("entra na sala mesmo quando a permissao de camera/mic e negada", async () => {
     getUserMediaMock.mockRejectedValue(new Error("denied"));
 
     render(<RoomPage />);
-    await screen.findByText(/Reunião com Paulo/);
+    await screen.findByText(/nao foi possivel acessar camera e microfone/);
+    expect(screen.queryByTestId("preview-video")).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
 
-    expect(await screen.findByText("nao foi possivel entrar na reuniao")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /entrar na reuniao/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("local-photo")).toBeInTheDocument());
+    expect(fakeConnections).toHaveLength(1);
+    expect(fakeConnections[0].started).toBe(true);
   });
 
   it("lista participantes com nome conforme entram e saem", async () => {

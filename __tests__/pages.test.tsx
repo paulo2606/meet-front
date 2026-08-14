@@ -64,6 +64,13 @@ describe("RoomPage", () => {
     Object.assign(navigator, {
       clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: {
+        getUserMedia: vi.fn().mockRejectedValue(new Error("denied")),
+        getDisplayMedia: vi.fn(),
+      },
+      configurable: true,
+    });
   });
 
   it("carrega e exibe os dados da reuniao", async () => {

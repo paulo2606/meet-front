@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
@@ -35,55 +36,69 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex flex-1 flex-col bg-zinc-50">
+    <div className="flex flex-1 flex-col">
       <header className="flex items-center px-6 py-5">
         <Logo />
       </header>
-      <main className="flex flex-1 items-start justify-center px-6 pb-20">
-        <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
-          <h1 className="mb-1 text-2xl font-medium text-zinc-900">Entrar</h1>
-          <p className="mb-6 text-sm text-zinc-500">use sua conta Meet</p>
+      <main
+        id="main"
+        className="flex flex-1 items-start justify-center px-6 pb-20"
+      >
+        <div className="w-full max-w-md rounded-box border border-line bg-surface p-8 shadow-near">
+          <h1 className="font-display text-2xl font-semibold text-ink">Entrar</h1>
+          <p className="mb-6 text-sm text-ink-3">use sua conta Meet</p>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <label className="flex flex-col gap-1 text-sm font-medium text-zinc-700">
-              email
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="login-email" className="text-sm font-medium text-ink">
+                email
+              </label>
               <input
+                id="login-email"
                 type="email"
                 required
                 autoComplete="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                className="rounded-lg border border-zinc-300 px-3 py-2.5 text-zinc-900 outline-none transition focus:border-blue-700 focus:ring-2 focus:ring-blue-700/20"
+                aria-invalid={error ? true : undefined}
+                className="rounded-box border border-line bg-surface px-3 py-2.5 text-ink outline-none transition placeholder:text-ink-3 focus:border-accent focus:ring-2 focus:ring-accent-soft"
               />
-            </label>
-            <label className="flex flex-col gap-1 text-sm font-medium text-zinc-700">
-              senha
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="login-password" className="text-sm font-medium text-ink">
+                senha
+              </label>
               <input
+                id="login-password"
                 type="password"
                 required
                 minLength={8}
                 autoComplete="current-password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                className="rounded-lg border border-zinc-300 px-3 py-2.5 text-zinc-900 outline-none transition focus:border-blue-700 focus:ring-2 focus:ring-blue-700/20"
+                aria-invalid={error ? true : undefined}
+                className="rounded-box border border-line bg-surface px-3 py-2.5 text-ink outline-none transition placeholder:text-ink-3 focus:border-accent focus:ring-2 focus:ring-accent-soft"
               />
-            </label>
-            {error && <p className="text-sm text-red-600">{error}</p>}
+              <p className="text-xs text-ink-3">minimo de 8 caracteres</p>
+            </div>
+            {error && (
+              <p role="alert" className="text-sm text-danger">
+                {error}
+              </p>
+            )}
             <button
               type="submit"
               disabled={submitting}
-              className="mt-2 rounded-full bg-blue-700 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-blue-800 disabled:opacity-50"
+              aria-busy={submitting}
+              className="mt-2 rounded-box bg-accent px-6 py-2.5 text-sm font-medium text-white transition hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-60"
             >
               {submitting ? "entrando..." : "entrar"}
             </button>
           </form>
-          <p className="mt-6 text-center text-sm text-zinc-600">
+          <p className="mt-6 text-center text-sm text-ink-2">
             ainda nao tem conta?{" "}
-            <a
-              href="/register"
-              className="font-medium text-blue-700 hover:underline"
-            >
+            <Link className="font-medium text-accent hover:underline" href="/register">
               criar conta
-            </a>
+            </Link>
           </p>
         </div>
       </main>

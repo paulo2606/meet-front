@@ -13,11 +13,12 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/components/auth-context", () => ({
   useAuth: () => ({
-    user: { userId: "user-1", name: "Paulo", email: "paulo@test.com" },
+    user: { userId: "user-1", name: "Paulo", email: "paulo@test.com", photoUrl: "/avatars/1.svg" },
     isLoading: false,
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
+    updatePhoto: vi.fn(),
     authRequest: authRequestMock,
   }),
 }));
@@ -244,7 +245,7 @@ describe("RoomPage WebRTC", () => {
     await waitFor(() => expect(screen.getByTestId("local-video")).toBeInTheDocument());
     expect(fakeConnections).toHaveLength(1);
     expect(fakeConnections[0].started).toBe(true);
-    expect(fakeConnections[0].invokes.some((i) => i.method === "Join" && i.args[0] === "meeting-1" && i.args[1] === "participant-1" && i.args[2] === "Paulo")).toBe(true);
+    expect(fakeConnections[0].invokes.some((i) => i.method === "Join" && i.args[0] === "meeting-1" && i.args[1] === "participant-1" && i.args[2] === "Paulo" && i.args[3] === "/avatars/1.svg")).toBe(true);
   });
 
   it("com outros participantes na sala, envia offer de video para cada um", async () => {
@@ -568,6 +569,47 @@ describe("RoomPage WebRTC", () => {
 
     await waitFor(() => expect(screen.queryByTestId("screen-video")).not.toBeInTheDocument());
     expect(screen.getByTestId("remote-video-peer-1")).toBeInTheDocument();
+  });
+
+  it("mostra card com foto quando a camera local e desligada", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /desligar camera/ }));
+
+    await waitFor(() => expect(screen.getByTestId("local-photo")).toBeInTheDocument());
+    expect(screen.queryByTestId("local-video")).not.toBeInTheDocument();
+    expect(fakeConnections[0].invokes.some((i) => i.method === "CameraState" && i.args[0] === "meeting-1" && i.args[1] === false)).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /ligar camera/ }));
+
+    await waitFor(() => expect(screen.getByTestId("local-video")).toBeInTheDocument());
+    expect(screen.queryByTestId("local-photo")).not.toBeInTheDocument();
+  });
+
+  it("mostra card com foto quando a camera de participante remoto e desligada", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    connection.trigger("PeerJoined", "peer-1", "Bruno", "/avatars/3.svg");
+    const peer = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1];
+    peer.ontrack?.({ streams: [makeRemoteStream()] });
+    await screen.findByTestId("remote-video-peer-1");
+
+    connection.trigger("CameraState", "peer-1", false);
+
+    await waitFor(() => expect(screen.getByTestId("remote-photo-peer-1")).toBeInTheDocument());
+    expect(screen.queryByTestId("remote-video-peer-1")).not.toBeInTheDocument();
+
+    connection.trigger("CameraState", "peer-1", true);
+
+    await waitFor(() => expect(screen.getByTestId("remote-video-peer-1")).toBeInTheDocument());
+    expect(screen.queryByTestId("remote-photo-peer-1")).not.toBeInTheDocument();
   });
 
   it("alterna a tela cheia", async () => {

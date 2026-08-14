@@ -23,6 +23,7 @@ const tokenResponse = (overrides: Partial<TokenResponse> = {}) => ({
   userId: "user-1",
   name: "Paulo",
   email: "paulo@test.com",
+  photoUrl: null,
   ...overrides,
 });
 
@@ -89,6 +90,38 @@ describe("AuthProvider", () => {
     expect(screen.getByText("Paulo")).toBeInTheDocument();
   });
 
+  it("login expoe a foto do usuario", async () => {
+    mocked.refresh.mockRejectedValue(new ApiError(401, ""));
+    mocked.login.mockResolvedValue(tokenResponse({ photoUrl: "/avatars/1.svg" }));
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.login("paulo@test.com", "senha-segura-123");
+    });
+
+    expect(result.current.user?.photoUrl).toBe("/avatars/1.svg");
+  });
+
+  it("updatePhoto atualiza a foto do usuario", async () => {
+    mocked.refresh.mockRejectedValue(new ApiError(401, ""));
+    mocked.login.mockResolvedValue(tokenResponse());
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.login("paulo@test.com", "senha-segura-123");
+    });
+
+    await act(async () => {
+      result.current.updatePhoto("/avatars/5.svg");
+    });
+
+    expect(result.current.user?.photoUrl).toBe("/avatars/5.svg");
+  });
+
   it("logout limpa o usuario e chama a api", async () => {
     renderReady();
 
@@ -121,7 +154,7 @@ describe("AuthProvider", () => {
       if (calls === 1) {
         return new Response(null, { status: 401 });
       }
-      return Response.json({ userId: "user-1", name: "Paulo", email: "paulo@test.com" } satisfies AuthUser);
+      return Response.json({ userId: "user-1", name: "Paulo", email: "paulo@test.com", photoUrl: null } satisfies AuthUser);
     });
 
     mocked.refresh.mockResolvedValue(tokenResponse({ accessToken: "token-novo" }));

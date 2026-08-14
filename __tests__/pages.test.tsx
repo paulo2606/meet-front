@@ -82,6 +82,32 @@ describe("RoomPage", () => {
     expect(await screen.findByText("reuniao nao encontrada")).toBeInTheDocument();
   });
 
+  it("permite tentar novamente quando a reuniao nao carrega", async () => {
+    authRequestMock
+      .mockRejectedValueOnce(new ApiError(500, ""))
+      .mockResolvedValueOnce(meeting);
+
+    render(<RoomPage />);
+
+    expect(await screen.findByText(/nao foi possivel carregar a reuniao/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /tentar novamente/i }));
+
+    expect(await screen.findByText(/Reunião com Paulo/)).toBeInTheDocument();
+  });
+
+  it("mostra erro quando nao consegue copiar o link", async () => {
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+
+    render(<RoomPage />);
+
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /copiar link/i }));
+
+    expect(await screen.findByText(/nao foi possivel copiar o link/)).toBeInTheDocument();
+  });
+
   it("copia o link de convite", async () => {
     render(<RoomPage />);
 

@@ -208,7 +208,6 @@ export default function RoomPage() {
   const connectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const hubRef = useRef<HubConnection | null>(null);
   const participantIdRef = useRef<string | null>(null);
-  const mockStreamsRef = useRef<MediaStream[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,7 +231,6 @@ export default function RoomPage() {
         connection.close();
       }
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
-      mockStreamsRef.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
       hubRef.current?.stop();
     },
     [],
@@ -557,8 +555,6 @@ export default function RoomPage() {
     connectionsRef.current.clear();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
-    mockStreamsRef.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
-    mockStreamsRef.current = [];
     setRemoteStreams([]);
     setParticipants([]);
     setCamerasOff({});
@@ -659,42 +655,6 @@ export default function RoomPage() {
   }
 
   const inviteUrl = meeting ? `${window.location.origin}/room/${meeting.id}` : "";
-
-  const addMockCameras = useCallback(() => {
-    const guardCanvas = document.createElement("canvas");
-    if (typeof guardCanvas.captureStream !== "function" || mockStreamsRef.current.length > 0) {
-      return;
-    }
-    const colors = ["#0f766e", "#c2410c", "#15803d", "#7c3aed", "#b91c1c"];
-    const newStreams: RemoteStream[] = [];
-    const newParticipants: Participant[] = [];
-    for (let index = 0; index < 10; index++) {
-      const canvas = document.createElement("canvas");
-      canvas.width = 320;
-      canvas.height = 180;
-      const context = canvas.getContext("2d");
-      const name = `mock ${index + 1}`;
-      if (context) {
-        context.fillStyle = colors[index % colors.length];
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        context.fillStyle = "#ffffff";
-        context.font = "26px sans-serif";
-        context.fillText(name, 16, 100);
-      }
-      const stream = canvas.captureStream(5);
-      mockStreamsRef.current.push(stream);
-      newStreams.push({ participantId: `mock-${index + 1}`, stream });
-      newParticipants.push({ participantId: `mock-${index + 1}`, name, photoUrl: null });
-    }
-    setRemoteStreams((prev) => [...prev, ...newStreams]);
-    setParticipants((prev) => [...prev, ...newParticipants]);
-  }, []);
-
-  useEffect(() => {
-    if (joined) {
-      addMockCameras();
-    }
-  }, [joined, addMockCameras]);
 
   const screenStream =
     sharing

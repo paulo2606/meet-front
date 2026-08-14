@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import RoomPage from "@/app/room/[id]/page";
 import type { MeetingResponse } from "@/lib/api";
 
@@ -236,10 +236,6 @@ describe("RoomPage WebRTC", () => {
     Object.assign(navigator, {
       clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
-  });
-
-  afterEach(() => {
-    delete (HTMLCanvasElement.prototype as { captureStream?: unknown }).captureStream;
   });
 
   it("entra na reuniao: pede camera/mic, conecta no hub e anuncia o join", async () => {
@@ -579,34 +575,32 @@ describe("RoomPage WebRTC", () => {
   });
 
   it("pagina a grade de ver mais durante a transmissao", async () => {
-    Object.defineProperty(HTMLCanvasElement.prototype, "captureStream", {
-      configurable: true,
-      value: vi.fn(() => makeRemoteStream()),
-    });
-
     render(<RoomPage />);
     await screen.findByText(/Reunião com Paulo/);
     fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
     await screen.findByTestId("local-video");
 
     const connection = fakeConnections[0];
-    await screen.findByTestId("remote-video-mock-1");
+    for (let index = 1; index <= 10; index++) {
+      addPeerWithStream(connection, `peer-${index}`, `Peer ${index}`);
+    }
+    await screen.findByTestId("remote-video-peer-1");
 
-    connection.trigger("ScreenShare", "mock-1", true);
+    connection.trigger("ScreenShare", "peer-1", true);
     await screen.findByTestId("screen-video");
 
     fireEvent.click(screen.getByRole("button", { name: /\+7 participantes/ }));
 
     expect(screen.getByTestId("screen-video")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-video-mock-8")).toBeInTheDocument();
-    expect(screen.queryByTestId("remote-video-mock-9")).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-video-peer-8")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-video-peer-9")).not.toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /proxima pagina/ }));
 
-    expect(await screen.findByTestId("remote-video-mock-9")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-video-mock-10")).toBeInTheDocument();
-    expect(screen.queryByTestId("remote-video-mock-2")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("remote-video-peer-9")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-video-peer-10")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-video-peer-2")).not.toBeInTheDocument();
     expect(screen.getByText("2 / 2")).toBeInTheDocument();
   });
 
@@ -638,24 +632,6 @@ describe("RoomPage WebRTC", () => {
     expect(await screen.findByTestId("remote-video-peer-1")).toBeInTheDocument();
     expect(screen.queryByTestId("remote-video-peer-9")).not.toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
-  });
-
-  it("adiciona cameras mock automaticamente ao entrar", async () => {
-    Object.defineProperty(HTMLCanvasElement.prototype, "captureStream", {
-      configurable: true,
-      value: vi.fn(() => makeRemoteStream()),
-    });
-
-    render(<RoomPage />);
-    await screen.findByText(/Reunião com Paulo/);
-    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
-    await screen.findByTestId("local-video");
-
-    expect(await screen.findByTestId("remote-video-mock-1")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-video-mock-8")).toBeInTheDocument();
-    expect(screen.queryByTestId("remote-video-mock-9")).not.toBeInTheDocument();
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /adicionar mock/ })).not.toBeInTheDocument();
   });
 
   it("volta ao grid quando o compartilhamento remoto para", async () => {

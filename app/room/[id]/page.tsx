@@ -49,6 +49,17 @@ type ChatMessage = {
   text: string;
 };
 
+type MediaDeviceOption = {
+  deviceId: string;
+  label: string;
+};
+
+function deviceOptions(devices: MediaDeviceOption[], selected: string): MediaDeviceOption[] {
+  const selectedOption =
+    devices.find((device) => device.deviceId === selected) ?? { deviceId: "default", label: "padrão" };
+  return [selectedOption, ...devices.filter((device) => device.deviceId !== selected)];
+}
+
 type LocalTileProps = {
   name: string;
   photoUrl: string | null | undefined;
@@ -94,6 +105,27 @@ type RemoteTileProps = {
   photoUrl: string | null | undefined;
   cameraOff: boolean;
 };
+
+function MicLevelMeter({ level }: { level: number }) {
+  return (
+    <div
+      role="meter"
+      aria-label="nível do microfone"
+      aria-valuenow={Math.round(level * 100)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      className="flex h-8 items-end gap-0.5"
+    >
+      {Array.from({ length: 12 }, (_, index) => (
+        <span
+          key={index}
+          className={`w-1.5 rounded-sm ${(index + 1) / 12 <= level ? "bg-accent" : "bg-line"}`}
+          style={{ height: `${((index + 1) / 12) * 100}%` }}
+        />
+      ))}
+    </div>
+  );
+}
 
 function RemoteTile({ participantId, stream, name, photoUrl, cameraOff }: RemoteTileProps) {
   if (cameraOff) {
@@ -156,6 +188,21 @@ export default function RoomPage() {
   const screenStreamRef = useRef<MediaStream | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatText, setChatText] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const [previewMicOn, setPreviewMicOn] = useState(true);
+  const [previewCameraOn, setPreviewCameraOn] = useState(true);
+  const [micLevel, setMicLevel] = useState(0);
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceOption[]>([]);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceOption[]>([]);
+  const [audioDeviceId, setAudioDeviceId] = useState("default");
+  const [videoDeviceId, setVideoDeviceId] = useState("default");
+  const [deviceError, setDeviceError] = useState("");
+  const previewStreamRef = useRef<MediaStream | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewAudioContextRef = useRef<AudioContext | null>(null);
+  const previewAnalyserRef = useRef<AnalyserNode | null>(null);
+  const previewRafRef = useRef<number | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const connectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -238,13 +285,184 @@ export default function RoomPage() {
     [id],
   );
 
+  const stopMicMeter = useCallback(() => {
+    if (previewRafRef.current !== null) {
+      cancelAnimationFrame(previewRafRef.current);
+      previewRafRef.current = null;
+    }
+    previewAnalyserRef.current?.disconnect?.();
+    previewAnalyserRef.current = null;
+    void previewAudioContextRef.current?.close?.();
+    previewAudioContextRef.current = null;
+  }, []);
+
+  const startMicMeter = useCallback(
+    (stream: MediaStream) => {
+      try {
+        if (typeof window.AudioContext === "undefined") {
+          return;
+        }
+        const context = new window.AudioContext();
+        const source = context.createMediaStreamSource(stream);
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        previewAudioContextRef.current = context;
+        previewAnalyserRef.current = analyser;
+        const data = new Uint8Array(analyser.fftSize);
+        const loop = () => {
+          analyser.getByteTimeDomainData(data);
+          let sum = 0;
+          for (const sample of data) {
+            const value = (sample - 128) / 128;
+            sum += value * value;
+          }
+          setMicLevel(Math.sqrt(sum / data.length));
+          previewRafRef.current = requestAnimationFrame(loop);
+        };
+        previewRafRef.current = requestAnimationFrame(loop);
+      } catch {
+        stopMicMeter();
+      }
+    },
+    [stopMicMeter],
+  );
+
+  const refreshDevices = useCallback(async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setAudioDevices(
+        devices
+          .filter((device) => device.kind === "audioinput")
+          .map(({ deviceId, label }) => ({ deviceId, label })),
+      );
+      setVideoDevices(
+        devices
+          .filter((device) => device.kind === "videoinput")
+          .map(({ deviceId, label }) => ({ deviceId, label })),
+      );
+    } catch {
+      setAudioDevices([]);
+      setVideoDevices([]);
+    }
+  }, []);
+
+  const startPreview = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      previewStreamRef.current?.getTracks().forEach((track) => track.stop());
+      previewStreamRef.current = stream;
+      setMicLevel(0);
+      setPreviewMicOn(true);
+      setPreviewCameraOn(true);
+      setPreviewing(true);
+      setAudioDeviceId("default");
+      setVideoDeviceId("default");
+      setDeviceError("");
+      stopMicMeter();
+      startMicMeter(stream);
+      await refreshDevices();
+    } catch {
+      setPreviewing(false);
+      setPreviewError("nao foi possivel acessar camera e microfone");
+    }
+  }, [startMicMeter, stopMicMeter, refreshDevices]);
+
+  useEffect(() => {
+    let cancelled = false;
+    navigator.mediaDevices
+      .getUserMedia({ video: true, audio: true })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        previewStreamRef.current = stream;
+        setMicLevel(0);
+        setPreviewMicOn(true);
+        setPreviewCameraOn(true);
+        setPreviewing(true);
+        startMicMeter(stream);
+        void refreshDevices();
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreviewing(false);
+          setPreviewError("nao foi possivel acessar camera e microfone");
+        }
+      });
+    return () => {
+      stopMicMeter();
+      previewStreamRef.current?.getTracks().forEach((track) => track.stop());
+      previewStreamRef.current = null;
+      cancelled = true;
+    };
+  }, [startMicMeter, stopMicMeter, refreshDevices]);
+
+  function togglePreviewMic() {
+    const next = !previewMicOn;
+    previewStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = next;
+    });
+    setPreviewMicOn(next);
+    if (!next) {
+      setMicLevel(0);
+    }
+  }
+
+  function togglePreviewCamera() {
+    const next = !previewCameraOn;
+    previewStreamRef.current?.getVideoTracks().forEach((track) => {
+      track.enabled = next;
+    });
+    setPreviewCameraOn(next);
+  }
+
+  async function switchDevices(audioId: string, videoId: string) {
+    setDeviceError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioId === "default" ? true : { deviceId: { exact: audioId } },
+        video: videoId === "default" ? true : { deviceId: { exact: videoId } },
+      });
+      previewStreamRef.current?.getTracks().forEach((track) => track.stop());
+      previewStreamRef.current = stream;
+      if (previewVideoRef.current) {
+        previewVideoRef.current.srcObject = stream;
+      }
+      setAudioDeviceId(audioId);
+      setVideoDeviceId(videoId);
+      stopMicMeter();
+      startMicMeter(stream);
+      setMicLevel(0);
+      setPreviewing(true);
+    } catch {
+      setDeviceError("nao foi possivel usar o dispositivo selecionado");
+    }
+  }
+
   async function handleJoin() {
     setJoining(true);
     setError("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const stream = previewStreamRef.current;
       localStreamRef.current = stream;
-      cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+      const initialCameraOn = stream ? previewCameraOn : false;
+      const initialMicOn = stream ? previewMicOn : false;
+      setCameraOn(initialCameraOn);
+      setMicOn(initialMicOn);
+      if (stream) {
+        cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+        stream.getVideoTracks().forEach((track) => {
+          track.enabled = initialCameraOn;
+        });
+        stream.getAudioTracks().forEach((track) => {
+          track.enabled = initialMicOn;
+        });
+      } else {
+        cameraTrackRef.current = null;
+      }
+      stopMicMeter();
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
@@ -315,12 +533,18 @@ export default function RoomPage() {
 
       await connection.start();
       await connection.invoke("Join", id, participantIdRef.current, selfName, selfPhotoUrl);
+      if (!initialCameraOn && hubRef.current) {
+        hubRef.current.invoke("CameraState", id, false).catch(() => undefined);
+      }
       setJoined(true);
     } catch {
       setError("nao foi possivel entrar na reuniao");
       setJoined(false);
+      stopMicMeter();
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
+      previewStreamRef.current = null;
+      setPreviewing(false);
     } finally {
       setJoining(false);
     }
@@ -347,6 +571,10 @@ export default function RoomPage() {
     setJoined(false);
     await hubRef.current?.stop();
     hubRef.current = null;
+    stopMicMeter();
+    previewStreamRef.current = null;
+    setPreviewing(false);
+    void startPreview();
   }
 
   async function sendChatMessage() {
@@ -956,9 +1184,112 @@ export default function RoomPage() {
 
         {meeting && (
           <div className="flex w-full max-w-lg flex-col items-center gap-6 text-center">
-            <div className="flex h-40 w-full flex-col items-center justify-center gap-2 rounded-box bg-room text-room-ink-3">
-              <CameraOffIcon className="h-8 w-8" />
-              câmera desativada
+            <div className="w-full">
+              {previewing ? (
+                <>
+                  <div className="relative aspect-video w-full overflow-hidden rounded-box bg-black ring-1 ring-room-line">
+                    <video
+                      autoPlay
+                      muted
+                      playsInline
+                      data-testid="preview-video"
+                      ref={(el) => {
+                        previewVideoRef.current = el;
+                        if (el && previewStreamRef.current && el.srcObject !== previewStreamRef.current) {
+                          el.srcObject = previewStreamRef.current;
+                        }
+                      }}
+                      className="h-full w-full object-cover"
+                    />
+                    {!previewCameraOn && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-room-tile">
+                        <div className="h-24 w-24 overflow-hidden rounded-full ring-4 ring-room-line">
+                          <Avatar photoUrl={user?.photoUrl} name={user?.name ?? "Convidado"} />
+                        </div>
+                      </div>
+                    )}
+                    <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
+                  </div>
+                  <div className="mt-4 flex items-center justify-center gap-3">
+                    <MicLevelMeter level={micLevel} />
+                    <button
+                      type="button"
+                      onClick={togglePreviewMic}
+                      aria-label={previewMicOn ? "desligar microfone no preview" : "ligar microfone no preview"}
+                      aria-pressed={!previewMicOn}
+                      className={`flex h-11 w-11 items-center justify-center rounded-box border transition ${
+                        previewMicOn
+                          ? "border-line bg-surface text-ink hover:border-accent hover:text-accent"
+                          : "border-danger bg-danger text-white"
+                      }`}
+                    >
+                      {previewMicOn ? <MicIcon className="h-5 w-5" /> : <MicOffIcon className="h-5 w-5" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={togglePreviewCamera}
+                      aria-label={previewCameraOn ? "desligar camera no preview" : "ligar camera no preview"}
+                      aria-pressed={!previewCameraOn}
+                      className={`flex h-11 w-11 items-center justify-center rounded-box border transition ${
+                        previewCameraOn
+                          ? "border-line bg-surface text-ink hover:border-accent hover:text-accent"
+                          : "border-danger bg-danger text-white"
+                      }`}
+                    >
+                      {previewCameraOn ? <CameraIcon className="h-5 w-5" /> : <CameraOffIcon className="h-5 w-5" />}
+                    </button>
+                  </div>
+                  <div className="mt-4 flex flex-wrap items-center justify-center gap-4">
+                    <label className="flex flex-col items-start gap-1 text-xs font-medium text-ink-3">
+                      microfone
+                      <select
+                        aria-label="microfone do preview"
+                        value={audioDeviceId}
+                        onChange={(event) => void switchDevices(event.target.value, videoDeviceId)}
+                        className="rounded-box border border-line bg-surface px-3 py-2 text-sm text-ink outline-none transition focus:border-accent"
+                      >
+                        {deviceOptions(audioDevices, audioDeviceId).map((device) => (
+                          <option key={device.deviceId} value={device.deviceId}>
+                            {device.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex flex-col items-start gap-1 text-xs font-medium text-ink-3">
+                      câmera
+                      <select
+                        aria-label="câmera do preview"
+                        value={videoDeviceId}
+                        onChange={(event) => void switchDevices(audioDeviceId, event.target.value)}
+                        className="rounded-box border border-line bg-surface px-3 py-2 text-sm text-ink outline-none transition focus:border-accent"
+                      >
+                        {deviceOptions(videoDevices, videoDeviceId).map((device) => (
+                          <option key={device.deviceId} value={device.deviceId}>
+                            {device.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  {deviceError && (
+                    <p role="alert" className="mt-3 text-sm text-danger">
+                      {deviceError}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <div className="flex h-40 w-full flex-col items-center justify-center gap-2 rounded-box bg-room text-room-ink-3">
+                  <CameraOffIcon className="h-8 w-8" />
+                  <p>{previewError || "câmera desativada"}</p>
+                  <button
+                    type="button"
+                    onClick={() => void startPreview()}
+                    className="text-sm font-medium text-accent-bright transition hover:underline"
+                  >
+                    tentar novamente
+                  </button>
+                </div>
+              )}
             </div>
             <div>
               <h1 className="font-display text-2xl font-semibold text-ink">

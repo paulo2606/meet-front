@@ -99,6 +99,12 @@ export const authApi = {
     });
   },
 
+  guestToken() {
+    return apiRequest<{ accessToken: string }>("/api/auth/guest-token", {
+      method: "POST",
+    });
+  },
+
   me(token: string) {
     return apiRequest<AuthUser>("/api/me", { method: "GET" }, token);
   },

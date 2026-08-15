@@ -20,10 +20,11 @@ import {
   MicOffIcon,
   ScreenShareIcon,
   SendIcon,
+  SettingsIcon,
   StopScreenShareIcon,
   UsersIcon,
 } from "@/components/logo";
-import { ApiError, type MeetingResponse } from "@/lib/api";
+import { ApiError, apiRequest, authApi, type MeetingResponse } from "@/lib/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -163,7 +164,7 @@ function RemoteTile({ participantId, stream, name, photoUrl, cameraOff }: Remote
 
 export default function RoomPage() {
   const { id } = useParams<{ id: string }>();
-  const { user, authRequest } = useAuth();
+  const { user, getAccessToken } = useAuth();
   const [meeting, setMeeting] = useState<MeetingResponse | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -198,6 +199,9 @@ export default function RoomPage() {
   const [audioDeviceId, setAudioDeviceId] = useState("default");
   const [videoDeviceId, setVideoDeviceId] = useState("default");
   const [deviceError, setDeviceError] = useState("");
+  const [connectionLost, setConnectionLost] = useState(false);
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [guestName, setGuestName] = useState("Convidado");
   const previewStreamRef = useRef<MediaStream | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewAudioContextRef = useRef<AudioContext | null>(null);
@@ -208,10 +212,23 @@ export default function RoomPage() {
   const connectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const hubRef = useRef<HubConnection | null>(null);
   const participantIdRef = useRef<string | null>(null);
+  const selfIdentityRef = useRef<{ name: string; photoUrl: string | null }>({
+    name: "Convidado",
+    photoUrl: null,
+  });
+
+  const getMeetingToken = useCallback(async () => {
+    if (user) {
+      return getAccessToken();
+    }
+    const response = await authApi.guestToken();
+    return response.accessToken;
+  }, [user, getAccessToken]);
 
   useEffect(() => {
     let cancelled = false;
-    authRequest<MeetingResponse>(`/api/meetings/${id}`)
+    getMeetingToken()
+      .then((token) => apiRequest<MeetingResponse>(`/api/meetings/${id}`, {}, token))
       .then((data) => {
         if (!cancelled) setMeeting(data);
       })
@@ -223,7 +240,7 @@ export default function RoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, authRequest]);
+  }, [id, getMeetingToken]);
 
   useEffect(
     () => () => {
@@ -243,6 +260,24 @@ export default function RoomPage() {
       connectionsRef.current.delete(participantId);
     }
     setRemoteStreams((prev) => prev.filter((remote) => remote.participantId !== participantId));
+  }, []);
+
+  const rebuildPeers = useCallback(() => {
+    for (const connection of connectionsRef.current.values()) {
+      connection.close();
+    }
+    connectionsRef.current.clear();
+    setRemoteStreams([]);
+    setParticipants([
+      {
+        participantId: participantIdRef.current ?? "",
+        name: selfIdentityRef.current.name,
+        photoUrl: selfIdentityRef.current.photoUrl,
+      },
+    ]);
+    setCamerasOff({});
+    setSharingParticipantId(null);
+    setShowAllCameras(false);
   }, []);
 
   const createPeer = useCallback(
@@ -465,13 +500,28 @@ export default function RoomPage() {
         localVideoRef.current.srcObject = stream;
       }
 
-      const connection = new HubConnectionBuilder().withUrl(`${API_URL}/hubs/meeting`).build();
+      const connection = new HubConnectionBuilder()
+        .withUrl(`${API_URL}/hubs/meeting`, {
+          accessTokenFactory: getMeetingToken,
+        })
+        .withAutomaticReconnect()
+        .build();
       hubRef.current = connection;
       participantIdRef.current = newParticipantId();
       setSelfId(participantIdRef.current);
-      const selfName = user?.name ?? "Convidado";
+      const selfName = user?.name ?? guestName;
       const selfPhotoUrl = user?.photoUrl ?? null;
+      selfIdentityRef.current = { name: selfName, photoUrl: selfPhotoUrl };
       setParticipants([{ participantId: participantIdRef.current, name: selfName, photoUrl: selfPhotoUrl }]);
+
+      connection.onreconnected = () => {
+        rebuildPeers();
+        setConnectionLost(false);
+        void connection.invoke("Join", id, participantIdRef.current ?? "", selfName, selfPhotoUrl);
+      };
+      connection.onclose = () => {
+        setConnectionLost(true);
+      };
 
       const addParticipant = (participant: Participant) => {
         setParticipants((prev) =>
@@ -645,6 +695,72 @@ export default function RoomPage() {
     setMicOn((value) => !value);
   }
 
+  async function retryReconnect() {
+    const connection = hubRef.current;
+    const participantId = participantIdRef.current;
+    if (!connection || !participantId) {
+      return;
+    }
+    setConnectionLost(false);
+    try {
+      await connection.start();
+      rebuildPeers();
+      await connection.invoke("Join", id, participantId, selfIdentityRef.current.name, selfIdentityRef.current.photoUrl);
+    } catch {
+      setConnectionLost(true);
+    }
+  }
+
+  async function switchMeetingDevice(kind: "audio" | "video", deviceId: string) {
+    const stream = localStreamRef.current;
+    if (!stream) {
+      return;
+    }
+    if (kind === "video" && sharing) {
+      setDeviceError("pare o compartilhamento de tela para trocar a camera");
+      return;
+    }
+    setDeviceError("");
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia(
+        kind === "audio"
+          ? { audio: deviceId === "default" ? true : { deviceId: { exact: deviceId } }, video: false }
+          : { video: deviceId === "default" ? true : { deviceId: { exact: deviceId } }, audio: false },
+      );
+      const newTrack = newStream.getTracks()[0];
+      const oldTrack = stream.getTracks().find((track) => track.kind === kind);
+      if (oldTrack) {
+        stream.removeTrack(oldTrack);
+        oldTrack.stop();
+      }
+      stream.addTrack(newTrack);
+      newTrack.enabled = true;
+      if (kind === "video") {
+        cameraTrackRef.current = newTrack;
+        setCameraOn(true);
+        hubRef.current?.invoke("CameraState", id, true).catch(() => undefined);
+      } else {
+        setMicOn(true);
+      }
+      for (const [targetParticipantId, connection] of connectionsRef.current) {
+        const sender = connection.getSenders().find((candidate) => candidate.track?.kind === kind);
+        if (sender) {
+          await sender.replaceTrack(newTrack);
+        }
+        const offer = await connection.createOffer();
+        await connection.setLocalDescription(offer);
+        await hubRef.current?.invoke("Offer", id, targetParticipantId, JSON.stringify(offer));
+      }
+      if (kind === "audio") {
+        setAudioDeviceId(deviceId);
+      } else {
+        setVideoDeviceId(deviceId);
+      }
+    } catch {
+      setDeviceError("nao foi possivel usar o dispositivo selecionado");
+    }
+  }
+
   function toggleCamera() {
     const next = !cameraOn;
     localStreamRef.current?.getVideoTracks().forEach((track) => {
@@ -710,7 +826,7 @@ export default function RoomPage() {
     setError("");
     setMeeting(null);
     try {
-      const data = await authRequest<MeetingResponse>(`/api/meetings/${id}`);
+      const data = await apiRequest<MeetingResponse>(`/api/meetings/${id}`, {}, await getMeetingToken());
       setMeeting(data);
     } catch (err) {
       setError(err instanceof ApiError && err.status === 404 ? "reuniao nao encontrada" : "nao foi possivel carregar a reuniao");
@@ -724,11 +840,27 @@ export default function RoomPage() {
           <Logo />
           <div className="flex items-center gap-3">
             <div className="h-9 w-9 overflow-hidden rounded-full bg-accent">
-              <Avatar photoUrl={user?.photoUrl} name={user?.name ?? "Convidado"} />
+              <Avatar photoUrl={user?.photoUrl} name={user?.name ?? guestName} />
             </div>
-            <span className="text-sm text-room-ink-2">{user?.name ?? "Convidado"}</span>
+            <span className="text-sm text-room-ink-2">{user?.name ?? guestName}</span>
           </div>
         </header>
+
+        {connectionLost && (
+          <div
+            role="alert"
+            className="flex shrink-0 items-center justify-center gap-3 bg-danger px-4 py-2 text-sm font-medium text-white"
+          >
+            conexao perdida
+            <button
+              type="button"
+              onClick={retryReconnect}
+              className="rounded-box bg-white/20 px-3 py-1 text-xs font-semibold transition hover:bg-white/30"
+            >
+              tentar reconectar
+            </button>
+          </div>
+        )}
 
         <main
           id="main"
@@ -798,7 +930,7 @@ export default function RoomPage() {
                     ) : tile.kind === "local" ? (
                       <div key={tile.key}>
                         <LocalTile
-                          name={user?.name ?? "Convidado"}
+                          name={user?.name ?? guestName}
                           photoUrl={user?.photoUrl}
                           cameraOn={cameraOn}
                           onVideoReady={(el) => {
@@ -851,7 +983,7 @@ export default function RoomPage() {
               <div className="flex w-full max-w-6xl items-start gap-4">
                 <div className="flex w-56 shrink-0 flex-col gap-3">
                   <LocalTile
-                    name={user?.name ?? "Convidado"}
+                    name={user?.name ?? guestName}
                     photoUrl={user?.photoUrl}
                     cameraOn={cameraOn}
                     onVideoReady={(el) => {
@@ -919,7 +1051,7 @@ export default function RoomPage() {
                   tile.kind === "local" ? (
                     <div key={tile.key}>
                       <LocalTile
-                        name={user?.name ?? "Convidado"}
+                        name={user?.name ?? guestName}
                         photoUrl={user?.photoUrl}
                         cameraOn={cameraOn}
                         onVideoReady={(el) => {
@@ -1007,6 +1139,20 @@ export default function RoomPage() {
             </button>
             <button
               type="button"
+              onClick={() => {
+                setDevicesOpen((open) => !open);
+                if (!devicesOpen) {
+                  void refreshDevices();
+                }
+              }}
+              aria-label="dispositivos"
+              aria-pressed={devicesOpen}
+              className={`flex h-12 w-12 items-center justify-center rounded-box transition ${devicesOpen ? "bg-accent text-white" : "bg-room-tile text-white hover:bg-black"}`}
+            >
+              <SettingsIcon className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
               onClick={handleLeave}
               className="flex h-12 items-center justify-center gap-2 rounded-box bg-danger px-6 text-sm font-medium text-white transition hover:bg-danger-strong"
             >
@@ -1014,6 +1160,57 @@ export default function RoomPage() {
               sair da reuniao
             </button>
           </div>
+
+          {devicesOpen && (
+            <div className="absolute bottom-40 left-1/2 flex w-80 -translate-x-1/2 flex-col gap-3 rounded-box border border-room-line bg-room-surface p-4 shadow-ambient">
+              <div className="flex items-center justify-between text-sm font-medium text-room-ink">
+                dispositivos
+                <button
+                  type="button"
+                  onClick={() => setDevicesOpen(false)}
+                  aria-label="fechar dispositivos"
+                  className="flex h-8 w-8 items-center justify-center rounded-box text-room-ink-3 transition hover:bg-room-tile hover:text-room-ink"
+                >
+                  <CloseIcon className="h-4 w-4" />
+                </button>
+              </div>
+              <label className="flex flex-col items-start gap-1 text-xs font-medium text-room-ink-2">
+                microfone
+                <select
+                  aria-label="microfone da reunião"
+                  value={audioDeviceId}
+                  onChange={(event) => void switchMeetingDevice("audio", event.target.value)}
+                  className="w-full rounded-box border border-room-line bg-room px-3 py-2 text-sm text-room-ink outline-none transition focus:border-accent"
+                >
+                  {deviceOptions(audioDevices, audioDeviceId).map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col items-start gap-1 text-xs font-medium text-room-ink-2">
+                câmera
+                <select
+                  aria-label="câmera da reunião"
+                  value={videoDeviceId}
+                  onChange={(event) => void switchMeetingDevice("video", event.target.value)}
+                  className="w-full rounded-box border border-room-line bg-room px-3 py-2 text-sm text-room-ink outline-none transition focus:border-accent"
+                >
+                  {deviceOptions(videoDevices, videoDeviceId).map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {deviceError && (
+                <p role="alert" className="text-sm text-danger">
+                  {deviceError}
+                </p>
+              )}
+            </div>
+          )}
 
           {participantsOpen && (
             <aside className="absolute right-4 bottom-40 top-28 flex w-80 flex-col overflow-hidden rounded-box border border-room-line bg-room-surface shadow-ambient">
@@ -1147,6 +1344,19 @@ export default function RoomPage() {
             <div className="w-full">
               {previewing ? (
                 <>
+                  {!user && (
+                    <label className="mb-4 flex flex-col items-start gap-1 text-left text-xs font-medium text-ink-3">
+                      seu nome
+                      <input
+                        type="text"
+                        aria-label="seu nome"
+                        value={guestName}
+                        maxLength={40}
+                        onChange={(event) => setGuestName(event.target.value)}
+                        className="w-full rounded-box border border-line bg-surface px-4 py-2 text-sm text-ink outline-none transition focus:border-accent"
+                      />
+                    </label>
+                  )}
                   <div className="relative aspect-video w-full overflow-hidden rounded-box bg-black ring-1 ring-room-line">
                     <video
                       autoPlay
@@ -1164,11 +1374,11 @@ export default function RoomPage() {
                     {!previewCameraOn && (
                       <div className="absolute inset-0 flex items-center justify-center bg-room-tile">
                         <div className="h-24 w-24 overflow-hidden rounded-full ring-4 ring-room-line">
-                          <Avatar photoUrl={user?.photoUrl} name={user?.name ?? "Convidado"} />
+                          <Avatar photoUrl={user?.photoUrl} name={user?.name ?? guestName} />
                         </div>
                       </div>
                     )}
-                    <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? "Convidado"}</p>
+                    <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? guestName}</p>
                   </div>
                   <div className="mt-4 flex items-center justify-center gap-3">
                     <MicLevelMeter level={micLevel} />

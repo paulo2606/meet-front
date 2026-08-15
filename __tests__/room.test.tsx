@@ -174,6 +174,49 @@ vi.mock("@microsoft/signalr", () => ({
   HubConnectionBuilder: FakeHubConnectionBuilder,
 }));
 
+const { createBackgroundEffectEngineMock, BackgroundEffectEngineMock, engineInstances, backgroundEffectsList } = vi.hoisted(
+  () => {
+    const engineInstances: {
+      setEffect: ReturnType<typeof vi.fn>;
+      stop: ReturnType<typeof vi.fn>;
+      processedTrack: { kind: string; enabled: boolean; stop: ReturnType<typeof vi.fn> };
+    }[] = [];
+    class BackgroundEffectEngineMock {
+      setEffect = vi.fn();
+      stop = vi.fn();
+      processedTrack = { kind: "video", enabled: true, stop: vi.fn() };
+      constructor() {
+        engineInstances.push(this);
+      }
+    }
+    const createBackgroundEffectEngineMock = vi.fn();
+    const backgroundEffectsList = [
+      { id: "none", label: "sem efeito", effect: { kind: "none" } },
+      { id: "blur", label: "desfoque", effect: { kind: "blur" } },
+      { id: "color-1", label: "azul", effect: { kind: "color", color: "#0f172a" } },
+      { id: "color-2", label: "verde", effect: { kind: "color", color: "#14532d" } },
+      { id: "gradient-1", label: "gradiente", effect: { kind: "gradient", from: "#0f172a", to: "#4c1d95" } },
+    ];
+    return { createBackgroundEffectEngineMock, BackgroundEffectEngineMock, engineInstances, backgroundEffectsList };
+  },
+);
+
+vi.mock("@/lib/background-effects", () => ({
+  createBackgroundEffectEngine: createBackgroundEffectEngineMock,
+  BackgroundEffectEngine: BackgroundEffectEngineMock,
+  BACKGROUND_EFFECTS: backgroundEffectsList,
+}));
+
+const { getPhotoColorMock, usePhotoColorMock } = vi.hoisted(() => ({
+  getPhotoColorMock: vi.fn(),
+  usePhotoColorMock: vi.fn(),
+}));
+
+vi.mock("@/lib/photo-color", () => ({
+  getPhotoColor: getPhotoColorMock,
+  usePhotoColor: usePhotoColorMock,
+}));
+
 const meeting: MeetingResponse = {
   id: "meeting-1",
   code: "ABC2345",
@@ -215,6 +258,17 @@ function addPeerWithStream(connection: { trigger: (name: string, ...args: unknow
   const peer = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1];
   peer.ontrack?.({ streams: [makeRemoteStream()] });
 }
+
+async function joinRoomWithPeer() {
+  render(<RoomPage />);
+  await screen.findByText(/Reunião com Paulo/);
+  fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+  await screen.findByTestId("local-video");
+  const connection = fakeConnections[0];
+  addPeerWithStream(connection, "peer-1", "Bruno");
+  await screen.findByTestId("remote-video-peer-1");
+  return connection;
+}
 const getUserMediaMock = vi.fn();
 const getDisplayMediaMock = vi.fn();
 const enumerateDevicesMock = vi.fn();
@@ -233,6 +287,13 @@ describe("RoomPage WebRTC", () => {
     FakeRTCPeerConnection.instances = [];
     hubBuilderOptions.url = "";
     hubBuilderOptions.options = null;
+    engineInstances.length = 0;
+    createBackgroundEffectEngineMock.mockReset();
+    createBackgroundEffectEngineMock.mockImplementation(() => Promise.resolve(new BackgroundEffectEngineMock()));
+    getPhotoColorMock.mockReset();
+    getPhotoColorMock.mockResolvedValue(null);
+    usePhotoColorMock.mockReset();
+    usePhotoColorMock.mockReturnValue(null);
     streamTracks.length = 0;
     streamTracks.push(videoTrack, audioTrack);
     Object.defineProperty(globalThis, "RTCPeerConnection", {
@@ -854,6 +915,19 @@ describe("RoomPage WebRTC", () => {
     expect(screen.queryByTestId("local-photo")).not.toBeInTheDocument();
   });
 
+  it("usa a cor dominante da foto de perfil como fundo do tile com camera desligada", async () => {
+    usePhotoColorMock.mockReturnValue("#334155");
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /desligar camera/ }));
+
+    await waitFor(() => expect(screen.getByTestId("local-photo")).toHaveStyle({ backgroundColor: "#334155" }));
+    expect(usePhotoColorMock).toHaveBeenCalledWith("/avatars/1.svg", true);
+  });
+
   it("mostra card com foto quando a camera de participante remoto e desligada", async () => {
     render(<RoomPage />);
     await screen.findByText(/Reunião com Paulo/);
@@ -893,5 +967,123 @@ describe("RoomPage WebRTC", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /alternar tela cheia/ }));
     expect(exitFullscreenMock).toHaveBeenCalled();
+  });
+
+  it("aplica efeito no preview antes de entrar e envia a track processada", async () => {
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+
+    await waitFor(() => expect(createBackgroundEffectEngineMock).toHaveBeenCalledWith(videoTrack));
+    expect(screen.getByRole("button", { name: "desfoque" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    addPeerWithStream(fakeConnections[0], "peer-1", "Bruno");
+    await screen.findByTestId("remote-video-peer-1");
+
+    const peer = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1];
+    expect(peer.addedTracks).toContain(engineInstances[0].processedTrack);
+  });
+
+  it("trocar de efeito no preview nao recria o motor", async () => {
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+    await waitFor(() => expect(createBackgroundEffectEngineMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "azul" }));
+
+    await waitFor(() =>
+      expect(engineInstances[0].setEffect).toHaveBeenCalledWith({ kind: "color", color: "#0f172a" })
+    );
+    expect(createBackgroundEffectEngineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("aplica efeito durante a reuniao e troca a track enviada", async () => {
+    const connection = await joinRoomWithPeer();
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+
+    await waitFor(() => expect(createBackgroundEffectEngineMock).toHaveBeenCalledWith(videoTrack));
+    const peer = FakeRTCPeerConnection.instances.find((instance) => instance.addedTracks.length > 0);
+    const videoSender = peer?.getSenders().find((sender) => sender.track?.kind === "video");
+    await waitFor(() => expect(videoSender?.replaceTrack).toHaveBeenCalledWith(engineInstances[0].processedTrack));
+    expect(connection.invokes.some((i) => i.method === "Offer")).toBe(true);
+    expect(screen.getByRole("button", { name: "desfoque" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("trocar de efeito na reuniao nao renegocia de novo", async () => {
+    await joinRoomWithPeer();
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+    await waitFor(() => expect(createBackgroundEffectEngineMock).toHaveBeenCalledTimes(1));
+    const peer = FakeRTCPeerConnection.instances.find((instance) => instance.addedTracks.length > 0);
+    const videoSender = peer?.getSenders().find((sender) => sender.track?.kind === "video");
+    await waitFor(() => expect(videoSender?.replaceTrack).toHaveBeenCalledWith(engineInstances[0].processedTrack));
+    const offersBefore = fakeConnections[0].invokes.filter((i) => i.method === "Offer").length;
+    videoSender?.replaceTrack.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "azul" }));
+
+    await waitFor(() =>
+      expect(engineInstances[0].setEffect).toHaveBeenCalledWith({ kind: "color", color: "#0f172a" })
+    );
+    expect(videoSender?.replaceTrack).not.toHaveBeenCalled();
+    expect(fakeConnections[0].invokes.filter((i) => i.method === "Offer")).toHaveLength(offersBefore);
+  });
+
+  it("desativa o efeito e restaura a camera original", async () => {
+    await joinRoomWithPeer();
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+    await waitFor(() => expect(createBackgroundEffectEngineMock).toHaveBeenCalledTimes(1));
+    const peer = FakeRTCPeerConnection.instances.find((instance) => instance.addedTracks.length > 0);
+    const videoSender = peer?.getSenders().find((sender) => sender.track?.kind === "video");
+    await waitFor(() => expect(videoSender?.replaceTrack).toHaveBeenCalledWith(engineInstances[0].processedTrack));
+
+    fireEvent.click(screen.getByRole("button", { name: "sem efeito" }));
+
+    await waitFor(() => expect(videoSender?.replaceTrack).toHaveBeenCalledWith(videoTrack));
+    expect(engineInstances[0].stop).toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "sem efeito" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("mantem o efeito apos parar o compartilhamento de tela", async () => {
+    await joinRoomWithPeer();
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+    await waitFor(() => expect(createBackgroundEffectEngineMock).toHaveBeenCalledTimes(1));
+    const peer = FakeRTCPeerConnection.instances.find((instance) => instance.addedTracks.length > 0);
+    const videoSender = peer?.getSenders().find((sender) => sender.track?.kind === "video");
+
+    fireEvent.click(screen.getByRole("button", { name: /compartilhar tela/ }));
+    await waitFor(() => expect(videoSender?.replaceTrack).toHaveBeenCalledWith(screenTrack));
+
+    fireEvent.click(screen.getByRole("button", { name: /parar de compartilhar a tela/ }));
+
+    await waitFor(() => expect(videoSender?.replaceTrack).toHaveBeenCalledWith(engineInstances[0].processedTrack));
+  });
+
+  it("nao aplica efeito durante o compartilhamento de tela", async () => {
+    await joinRoomWithPeer();
+
+    fireEvent.click(screen.getByRole("button", { name: /compartilhar tela/ }));
+    await screen.findByTestId("screen-video");
+
+    fireEvent.click(screen.getByRole("button", { name: /efeitos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "desfoque" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/pare o compartilhamento/);
+    expect(createBackgroundEffectEngineMock).not.toHaveBeenCalled();
   });
 });

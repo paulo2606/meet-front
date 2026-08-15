@@ -138,6 +138,20 @@ describe("AuthProvider", () => {
     expect(screen.getByText("deslogado")).toBeInTheDocument();
   });
 
+  it("getAccessToken retorna o token da sessao", async () => {
+    mocked.refresh.mockRejectedValue(new ApiError(401, ""));
+    mocked.login.mockResolvedValue(tokenResponse({ accessToken: "token-acesso" }));
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.login("paulo@test.com", "senha-segura-123");
+    });
+
+    await expect(result.current.getAccessToken()).resolves.toBe("token-acesso");
+  });
+
   it("authRequest tenta renovar a sessao ao receber 401 e refaz a requisicao", async () => {
     mocked.refresh.mockRejectedValue(new ApiError(401, ""));
     mocked.login.mockResolvedValue(tokenResponse({ accessToken: "token-velho" }));

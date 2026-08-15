@@ -1,29 +1,50 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import RoomPage from "@/app/room/[id]/page";
 import type { MeetingResponse } from "@/lib/api";
 
-const pushMock = vi.fn();
-const authRequestMock = vi.fn();
+const { pushMock, authRequestMock, apiRequestMock, guestTokenMock } = vi.hoisted(() => ({
+  pushMock: vi.fn(),
+  authRequestMock: vi.fn(),
+  apiRequestMock: vi.fn(),
+  guestTokenMock: vi.fn(),
+}));
+
+let currentUser: { userId: string; name: string; email: string; photoUrl: string | null } | null = {
+  userId: "user-1",
+  name: "Paulo",
+  email: "paulo@test.com",
+  photoUrl: "/avatars/1.svg",
+};
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock }),
   useParams: () => ({ id: "meeting-1" }),
 }));
 
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    apiRequest: apiRequestMock,
+    authApi: { ...actual.authApi, guestToken: guestTokenMock },
+  };
+});
+
 vi.mock("@/components/auth-context", () => ({
   useAuth: () => ({
-    user: { userId: "user-1", name: "Paulo", email: "paulo@test.com", photoUrl: "/avatars/1.svg" },
+    user: currentUser,
     isLoading: false,
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
     updatePhoto: vi.fn(),
+    getAccessToken: vi.fn(async () => "token-acesso"),
     authRequest: authRequestMock,
   }),
 }));
 
-const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection } = vi.hoisted(() => {
+const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection, hubBuilderOptions } = vi.hoisted(() => {
   type Handler = (...args: never[]) => void;
 
   class FakeHubConnection {
@@ -31,6 +52,9 @@ const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection } = vi.
     invokes: { method: string; args: unknown[] }[] = [];
     started = false;
     stopped = false;
+    startCount = 0;
+    onreconnected: (() => void) | null = null;
+    onclose: ((error?: Error) => void) | null = null;
 
     on(name: string, handler: Handler) {
       this.handlers.set(name, handler);
@@ -43,6 +67,7 @@ const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection } = vi.
 
     start() {
       this.started = true;
+      this.startCount += 1;
       return Promise.resolve();
     }
 
@@ -59,8 +84,19 @@ const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection } = vi.
     }
   }
 
+  const hubBuilderOptions: {
+    url: string;
+    options: { accessTokenFactory?: () => Promise<string> } | null;
+  } = { url: "", options: null };
+
   class FakeHubConnectionBuilder {
-    withUrl() {
+    withUrl(url: string, options?: { accessTokenFactory?: () => Promise<string> }) {
+      hubBuilderOptions.url = url;
+      hubBuilderOptions.options = options ?? null;
+      return this;
+    }
+
+    withAutomaticReconnect() {
       return this;
     }
 
@@ -131,7 +167,7 @@ const { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection } = vi.
   }
 
   const fakeConnections: FakeHubConnection[] = [];
-  return { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection };
+  return { fakeConnections, FakeHubConnectionBuilder, FakeRTCPeerConnection, hubBuilderOptions };
 });
 
 vi.mock("@microsoft/signalr", () => ({
@@ -189,9 +225,14 @@ describe("RoomPage WebRTC", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
+    currentUser = { userId: "user-1", name: "Paulo", email: "paulo@test.com", photoUrl: "/avatars/1.svg" };
     authRequestMock.mockResolvedValue(meeting);
+    apiRequestMock.mockResolvedValue(meeting);
+    guestTokenMock.mockResolvedValue({ accessToken: "token-convidado" });
     fakeConnections.length = 0;
     FakeRTCPeerConnection.instances = [];
+    hubBuilderOptions.url = "";
+    hubBuilderOptions.options = null;
     streamTracks.length = 0;
     streamTracks.push(videoTrack, audioTrack);
     Object.defineProperty(globalThis, "RTCPeerConnection", {
@@ -249,6 +290,89 @@ describe("RoomPage WebRTC", () => {
     expect(fakeConnections).toHaveLength(1);
     expect(fakeConnections[0].started).toBe(true);
     expect(fakeConnections[0].invokes.some((i) => i.method === "Join" && i.args[0] === "meeting-1" && i.args[1] === "participant-1" && i.args[2] === "Paulo" && i.args[3] === "/avatars/1.svg")).toBe(true);
+  });
+
+  it("usa o token de acesso ao conectar no hub", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    expect(hubBuilderOptions.url).toContain("/hubs/meeting");
+    await expect(hubBuilderOptions.options?.accessTokenFactory?.()).resolves.toBe("token-acesso");
+  });
+
+  it("reconecta e refaz o join apos a conexao cair", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    addPeerWithStream(connection, "peer-1", "Bruno");
+    await screen.findByTestId("remote-video-peer-1");
+    const connectionsBefore = FakeRTCPeerConnection.instances.length;
+
+    connection.onreconnected?.();
+
+    await waitFor(() => expect(connection.invokes.filter((i) => i.method === "Join")).toHaveLength(2));
+    expect(screen.queryByTestId("remote-video-peer-1")).not.toBeInTheDocument();
+
+    connection.trigger("Peers", [{ participantId: "peer-1", name: "Bruno" }]);
+    await waitFor(() => expect(FakeRTCPeerConnection.instances.length).toBeGreaterThan(connectionsBefore));
+  });
+
+  it("mostra aviso de conexao perdida e permite tentar reconectar", async () => {
+    render(<RoomPage />);
+    await screen.findByText(/Reunião com Paulo/);
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    act(() => {
+      connection.onclose?.(new Error("timeout"));
+    });
+
+    expect(screen.getByText(/conexao perdida/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /tentar reconectar/ }));
+
+    await waitFor(() => expect(connection.startCount).toBe(2));
+    await waitFor(() => expect(connection.invokes.filter((i) => i.method === "Join")).toHaveLength(2));
+    expect(screen.queryByText(/conexao perdida/)).not.toBeInTheDocument();
+  });
+
+  it("convidado pode definir o nome antes de entrar e envia no join", async () => {
+    currentUser = null;
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    const nameInput = screen.getByLabelText("seu nome");
+    expect(nameInput).toHaveValue("Convidado");
+
+    fireEvent.change(nameInput, { target: { value: "Bia" } });
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+
+    await screen.findByTestId("local-video");
+    expect(fakeConnections[0].invokes.some((i) => i.method === "Join" && i.args[2] === "Bia")).toBe(true);
+  });
+
+  it("convidado busca token de convidado para carregar a sala e conectar no hub", async () => {
+    currentUser = null;
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+
+    expect(guestTokenMock).toHaveBeenCalled();
+    expect(apiRequestMock).toHaveBeenCalledWith("/api/meetings/meeting-1", {}, "token-convidado");
+
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const token = await hubBuilderOptions.options?.accessTokenFactory?.();
+    expect(token).toBe("token-convidado");
   });
 
   it("mostra preview de camera e mic antes de entrar", async () => {
@@ -312,6 +436,67 @@ describe("RoomPage WebRTC", () => {
     await waitFor(() =>
       expect(getUserMediaMock).toHaveBeenCalledWith({ video: true, audio: { deviceId: { exact: "mic-2" } } })
     );
+  });
+
+  it("troca a camera durante a reuniao e renegocia com os participantes", async () => {
+    enumerateDevicesMock.mockResolvedValue([
+      { kind: "videoinput", deviceId: "cam-1", label: "câmera padrão" },
+      { kind: "videoinput", deviceId: "cam-2", label: "câmera usb" },
+    ]);
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    addPeerWithStream(connection, "peer-1", "Bruno");
+    await screen.findByTestId("remote-video-peer-1");
+
+    getUserMediaMock.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: /dispositivos/ }));
+    const camSelect = await screen.findByLabelText("câmera da reunião");
+    fireEvent.change(camSelect, { target: { value: "cam-2" } });
+
+    await waitFor(() =>
+      expect(getUserMediaMock).toHaveBeenCalledWith({ video: { deviceId: { exact: "cam-2" } }, audio: false })
+    );
+    const peer = FakeRTCPeerConnection.instances.find((instance) => instance.addedTracks.length > 0);
+    const videoSender = peer?.getSenders().find((sender) => sender.track?.kind === "video");
+    expect(videoSender?.replaceTrack).toHaveBeenCalled();
+    expect(connection.invokes.some((i) => i.method === "Offer")).toBe(true);
+    expect(connection.invokes.some((i) => i.method === "CameraState" && i.args[1] === true)).toBe(true);
+  });
+
+  it("troca o microfone durante a reuniao e renegocia com os participantes", async () => {
+    enumerateDevicesMock.mockResolvedValue([
+      { kind: "audioinput", deviceId: "mic-1", label: "microfone padrão" },
+      { kind: "audioinput", deviceId: "mic-2", label: "microfone usb" },
+    ]);
+
+    render(<RoomPage />);
+    await screen.findByTestId("preview-video");
+    fireEvent.click(screen.getByRole("button", { name: /entrar na reuniao/ }));
+    await screen.findByTestId("local-video");
+
+    const connection = fakeConnections[0];
+    addPeerWithStream(connection, "peer-1", "Bruno");
+    await screen.findByTestId("remote-video-peer-1");
+
+    getUserMediaMock.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: /dispositivos/ }));
+    const micSelect = await screen.findByLabelText("microfone da reunião");
+    fireEvent.change(micSelect, { target: { value: "mic-2" } });
+
+    await waitFor(() =>
+      expect(getUserMediaMock).toHaveBeenCalledWith({ video: false, audio: { deviceId: { exact: "mic-2" } } })
+    );
+    const peer = FakeRTCPeerConnection.instances.find((instance) => instance.addedTracks.length > 0);
+    const audioSender = peer?.getSenders().find((sender) => sender.track?.kind === "audio");
+    expect(audioSender?.replaceTrack).toHaveBeenCalled();
+    expect(connection.invokes.some((i) => i.method === "Offer")).toBe(true);
   });
 
   it("ajustes do preview valem ao entrar na sala", async () => {

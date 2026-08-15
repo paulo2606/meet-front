@@ -22,6 +22,7 @@ vi.mock("@/components/auth-context", () => ({
     register: vi.fn(),
     logout: vi.fn(),
     updatePhoto: updatePhotoMock,
+    getAccessToken: vi.fn(async () => "token-acesso"),
     authRequest: authRequestMock,
   }),
 }));

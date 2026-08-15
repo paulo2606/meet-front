@@ -5,13 +5,24 @@ import RoomPage from "@/app/room/[id]/page";
 import type { MeetingResponse } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 
-const pushMock = vi.fn();
-const authRequestMock = vi.fn();
+const { pushMock, authRequestMock, apiRequestMock } = vi.hoisted(() => ({
+  pushMock: vi.fn(),
+  authRequestMock: vi.fn(),
+  apiRequestMock: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock }),
   useParams: () => ({ id: "meeting-1" }),
 }));
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    apiRequest: apiRequestMock,
+  };
+});
 
 vi.mock("@/components/auth-context", () => ({
   useAuth: () => ({
@@ -20,6 +31,7 @@ vi.mock("@/components/auth-context", () => ({
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
+    getAccessToken: vi.fn(async () => "token-acesso"),
     authRequest: authRequestMock,
   }),
 }));
@@ -61,6 +73,7 @@ describe("RoomPage", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     authRequestMock.mockResolvedValue(meeting);
+    apiRequestMock.mockResolvedValue(meeting);
     Object.assign(navigator, {
       clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
@@ -78,11 +91,11 @@ describe("RoomPage", () => {
 
     expect(await screen.findByText(/Reunião com Paulo/)).toBeInTheDocument();
     expect(screen.getByText("ABC2345")).toBeInTheDocument();
-    expect(authRequestMock).toHaveBeenCalledWith("/api/meetings/meeting-1");
+    expect(apiRequestMock).toHaveBeenCalledWith("/api/meetings/meeting-1", {}, "token-acesso");
   });
 
   it("mostra erro quando a reuniao nao existe", async () => {
-    authRequestMock.mockRejectedValue(new ApiError(404, ""));
+    apiRequestMock.mockRejectedValue(new ApiError(404, ""));
 
     render(<RoomPage />);
 
@@ -90,7 +103,7 @@ describe("RoomPage", () => {
   });
 
   it("permite tentar novamente quando a reuniao nao carrega", async () => {
-    authRequestMock
+    apiRequestMock
       .mockRejectedValueOnce(new ApiError(500, ""))
       .mockResolvedValueOnce(meeting);
 

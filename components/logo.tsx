@@ -187,6 +187,15 @@ export function SettingsIcon({ className = "" }: IconProps) {
   );
 }
 
+export function SparklesIcon({ className = "" }: IconProps) {
+  return (
+    <Icon className={className}>
+      <path d="M12 3l1.9 5.1a2 2 0 0 0 1 1L20 11l-5.1 1.9a2 2 0 0 0-1 1L12 19l-1.9-5.1a2 2 0 0 0-1-1L4 11l5.1-1.9a2 2 0 0 0 1-1L12 3z" />
+      <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z" />
+    </Icon>
+  );
+}
+
 export function Logo({ text = "Meet" }: { text?: string }) {
   return (
     <Link href="/" className="group flex items-center gap-3">

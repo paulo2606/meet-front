@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
 import { useAuth } from "@/components/auth-context";
 import { Avatar } from "@/components/avatar";
+import { usePhotoColor } from "@/lib/photo-color";
 import {
   CameraIcon,
   CameraOffIcon,
@@ -25,6 +26,8 @@ import {
   UsersIcon,
 } from "@/components/logo";
 import { ApiError, apiRequest, authApi, type MeetingResponse } from "@/lib/api";
+import { createBackgroundEffectEngine, type BackgroundEffect, type BackgroundEffectEngine } from "@/lib/background-effects";
+import { EffectsPanel } from "@/components/effects-panel";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -69,10 +72,12 @@ type LocalTileProps = {
 };
 
 function LocalTile({ name, photoUrl, cameraOn, onVideoReady }: LocalTileProps) {
+  const tileColor = usePhotoColor(photoUrl, !cameraOn);
   if (!cameraOn) {
     return (
       <div
         className="relative aspect-video overflow-hidden rounded-box bg-room-tile ring-1 ring-room-line"
+        style={tileColor ? { backgroundColor: tileColor } : undefined}
         data-testid="local-photo"
       >
         <div className="flex h-full w-full items-center justify-center">
@@ -129,10 +134,12 @@ function MicLevelMeter({ level }: { level: number }) {
 }
 
 function RemoteTile({ participantId, stream, name, photoUrl, cameraOff }: RemoteTileProps) {
+  const tileColor = usePhotoColor(photoUrl, cameraOff);
   if (cameraOff) {
     return (
       <div
         className="relative aspect-video overflow-hidden rounded-box bg-room-tile ring-1 ring-room-line"
+        style={tileColor ? { backgroundColor: tileColor } : undefined}
         data-testid={`remote-photo-${participantId}`}
       >
         <div className="flex h-full w-full items-center justify-center">
@@ -202,6 +209,9 @@ export default function RoomPage() {
   const [connectionLost, setConnectionLost] = useState(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [guestName, setGuestName] = useState("Convidado");
+  const [effectsOpen, setEffectsOpen] = useState(false);
+  const [backgroundEffect, setBackgroundEffect] = useState<BackgroundEffect>({ kind: "none" });
+  const [effectError, setEffectError] = useState("");
   const previewStreamRef = useRef<MediaStream | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewAudioContextRef = useRef<AudioContext | null>(null);
@@ -209,6 +219,9 @@ export default function RoomPage() {
   const previewRafRef = useRef<number | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const effectEngineRef = useRef<BackgroundEffectEngine | null>(null);
+  const applyingEffectRef = useRef(false);
+  const effectRef = useRef<BackgroundEffect>({ kind: "none" });
   const connectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const hubRef = useRef<HubConnection | null>(null);
   const participantIdRef = useRef<string | null>(null);
@@ -247,7 +260,9 @@ export default function RoomPage() {
       for (const connection of connectionsRef.current.values()) {
         connection.close();
       }
+      effectEngineRef.current?.stop();
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
+      cameraTrackRef.current?.stop();
       hubRef.current?.stop();
     },
     [],
@@ -380,11 +395,122 @@ export default function RoomPage() {
     }
   }, []);
 
+  async function replaceOutboundVideoTrack(track: MediaStreamTrack) {
+    for (const [targetParticipantId, connection] of connectionsRef.current) {
+      const sender = connection.getSenders().find((candidate) => candidate.track?.kind === "video");
+      if (sender) {
+        await sender.replaceTrack(track);
+      }
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      await hubRef.current?.invoke("Offer", id, targetParticipantId, JSON.stringify(offer));
+    }
+  }
+
+  async function syncPreviewEffect(stream: MediaStream) {
+    if (effectRef.current.kind === "none") {
+      return;
+    }
+    const rawTrack = stream.getVideoTracks()[0];
+    if (!rawTrack) {
+      return;
+    }
+    cameraTrackRef.current?.stop();
+    cameraTrackRef.current = rawTrack;
+    effectEngineRef.current?.stop();
+    effectEngineRef.current = null;
+    try {
+      const engine = await createBackgroundEffectEngine(rawTrack);
+      engine.setEffect(effectRef.current);
+      effectEngineRef.current = engine;
+      const currentVideo = stream.getVideoTracks()[0];
+      if (currentVideo && currentVideo !== engine.processedTrack) {
+        stream.removeTrack(currentVideo);
+      }
+      stream.addTrack(engine.processedTrack);
+    } catch {
+      setBackgroundEffect({ kind: "none" });
+      effectRef.current = { kind: "none" };
+    }
+  }
+
+  async function applyBackgroundEffect(effect: BackgroundEffect) {
+    if (applyingEffectRef.current) {
+      return;
+    }
+    setEffectError("");
+    if (sharing) {
+      setEffectError("pare o compartilhamento de tela para usar efeitos");
+      return;
+    }
+    const stream = localStreamRef.current ?? previewStreamRef.current;
+    const rawTrack = cameraTrackRef.current ?? stream?.getVideoTracks()[0] ?? null;
+    if (!stream || !rawTrack) {
+      setEffectError("ative a camera para usar efeitos");
+      return;
+    }
+    if (effect.kind === "none") {
+      const engine = effectEngineRef.current;
+      if (engine) {
+        effectEngineRef.current = null;
+        applyingEffectRef.current = true;
+        try {
+          const processed = stream.getVideoTracks().find((track) => track !== rawTrack);
+          if (processed) {
+            stream.removeTrack(processed);
+          }
+          stream.addTrack(rawTrack);
+          engine.stop();
+          if (connectionsRef.current.size > 0) {
+            await replaceOutboundVideoTrack(rawTrack);
+          }
+        } finally {
+          applyingEffectRef.current = false;
+        }
+      }
+      setBackgroundEffect({ kind: "none" });
+      effectRef.current = { kind: "none" };
+      return;
+    }
+    const engine = effectEngineRef.current;
+    if (engine) {
+      engine.setEffect(effect);
+      setBackgroundEffect(effect);
+      effectRef.current = effect;
+      return;
+    }
+    applyingEffectRef.current = true;
+    try {
+      const newEngine = await createBackgroundEffectEngine(rawTrack);
+      newEngine.setEffect(effect);
+      effectEngineRef.current = newEngine;
+      const processed = newEngine.processedTrack;
+      const currentVideo = stream.getVideoTracks().find((track) => track === rawTrack);
+      if (currentVideo) {
+        stream.removeTrack(currentVideo);
+      }
+      stream.addTrack(processed);
+      if (connectionsRef.current.size > 0) {
+        await replaceOutboundVideoTrack(processed);
+      }
+      setBackgroundEffect(effect);
+      effectRef.current = effect;
+    } catch {
+      setEffectError("nao foi possivel aplicar o efeito");
+    } finally {
+      applyingEffectRef.current = false;
+    }
+  }
+
   const startPreview = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       previewStreamRef.current?.getTracks().forEach((track) => track.stop());
       previewStreamRef.current = stream;
+      cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+      if (effectRef.current.kind !== "none") {
+        void syncPreviewEffect(stream);
+      }
       setMicLevel(0);
       setPreviewMicOn(true);
       setPreviewCameraOn(true);
@@ -411,6 +537,7 @@ export default function RoomPage() {
           return;
         }
         previewStreamRef.current = stream;
+        cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
         setMicLevel(0);
         setPreviewMicOn(true);
         setPreviewCameraOn(true);
@@ -448,6 +575,9 @@ export default function RoomPage() {
     previewStreamRef.current?.getVideoTracks().forEach((track) => {
       track.enabled = next;
     });
+    if (cameraTrackRef.current) {
+      cameraTrackRef.current.enabled = next;
+    }
     setPreviewCameraOn(next);
   }
 
@@ -460,6 +590,10 @@ export default function RoomPage() {
       });
       previewStreamRef.current?.getTracks().forEach((track) => track.stop());
       previewStreamRef.current = stream;
+      cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+      if (effectRef.current.kind !== "none") {
+        void syncPreviewEffect(stream);
+      }
       if (previewVideoRef.current) {
         previewVideoRef.current.srcObject = stream;
       }
@@ -485,10 +619,15 @@ export default function RoomPage() {
       setCameraOn(initialCameraOn);
       setMicOn(initialMicOn);
       if (stream) {
-        cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+        if (!cameraTrackRef.current) {
+          cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+        }
         stream.getVideoTracks().forEach((track) => {
           track.enabled = initialCameraOn;
         });
+        if (cameraTrackRef.current) {
+          cameraTrackRef.current.enabled = initialCameraOn;
+        }
         stream.getAudioTracks().forEach((track) => {
           track.enabled = initialMicOn;
         });
@@ -603,6 +742,10 @@ export default function RoomPage() {
       connection.close();
     }
     connectionsRef.current.clear();
+    effectEngineRef.current?.stop();
+    effectEngineRef.current = null;
+    setEffectsOpen(false);
+    setEffectError("");
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     setRemoteStreams([]);
@@ -662,18 +805,17 @@ export default function RoomPage() {
 
   function stopScreenShare() {
     const screenTrack = screenTrackRef.current;
-    const cameraTrack = cameraTrackRef.current;
-    if (cameraTrack) {
+    const videoTrack = effectEngineRef.current?.processedTrack ?? cameraTrackRef.current;
+    if (videoTrack) {
       for (const connection of connectionsRef.current.values()) {
         const sender = connection.getSenders().find((candidate) => candidate.track?.kind === "video");
-        sender?.replaceTrack(cameraTrack);
+        sender?.replaceTrack(videoTrack);
       }
     }
     screenTrack?.stop();
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenTrackRef.current = null;
     screenStreamRef.current = null;
-    cameraTrackRef.current = null;
     setSharing(false);
     setSharingParticipantId((current) => (current === participantIdRef.current ? null : current));
     setLocalScreenStream(null);
@@ -727,30 +869,49 @@ export default function RoomPage() {
           ? { audio: deviceId === "default" ? true : { deviceId: { exact: deviceId } }, video: false }
           : { video: deviceId === "default" ? true : { deviceId: { exact: deviceId } }, audio: false },
       );
-      const newTrack = newStream.getTracks()[0];
-      const oldTrack = stream.getTracks().find((track) => track.kind === kind);
-      if (oldTrack) {
-        stream.removeTrack(oldTrack);
-        oldTrack.stop();
-      }
-      stream.addTrack(newTrack);
-      newTrack.enabled = true;
-      if (kind === "video") {
-        cameraTrackRef.current = newTrack;
-        setCameraOn(true);
-        hubRef.current?.invoke("CameraState", id, true).catch(() => undefined);
-      } else {
-        setMicOn(true);
-      }
-      for (const [targetParticipantId, connection] of connectionsRef.current) {
-        const sender = connection.getSenders().find((candidate) => candidate.track?.kind === kind);
-        if (sender) {
-          await sender.replaceTrack(newTrack);
+    const newTrack = newStream.getTracks()[0];
+    let outboundTrack = newTrack;
+    if (kind === "video") {
+      const activeEffect = effectRef.current;
+      const currentEngine = effectEngineRef.current;
+      if (currentEngine && activeEffect.kind !== "none") {
+        try {
+          currentEngine.stop();
+          effectEngineRef.current = null;
+          const engine = await createBackgroundEffectEngine(newTrack);
+          engine.setEffect(activeEffect);
+          engine.processedTrack.enabled = true;
+          effectEngineRef.current = engine;
+          outboundTrack = engine.processedTrack;
+        } catch {
+          effectEngineRef.current = null;
+          setBackgroundEffect({ kind: "none" });
+          effectRef.current = { kind: "none" };
         }
-        const offer = await connection.createOffer();
-        await connection.setLocalDescription(offer);
-        await hubRef.current?.invoke("Offer", id, targetParticipantId, JSON.stringify(offer));
       }
+      cameraTrackRef.current?.stop();
+      cameraTrackRef.current = newTrack;
+      setCameraOn(true);
+      hubRef.current?.invoke("CameraState", id, true).catch(() => undefined);
+    } else {
+      setMicOn(true);
+    }
+    const oldTrack = stream.getTracks().find((track) => track.kind === kind);
+    if (oldTrack && oldTrack !== outboundTrack) {
+      stream.removeTrack(oldTrack);
+      oldTrack.stop();
+    }
+    stream.addTrack(outboundTrack);
+    outboundTrack.enabled = true;
+    for (const [targetParticipantId, connection] of connectionsRef.current) {
+      const sender = connection.getSenders().find((candidate) => candidate.track?.kind === kind);
+      if (sender) {
+        await sender.replaceTrack(outboundTrack);
+      }
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      await hubRef.current?.invoke("Offer", id, targetParticipantId, JSON.stringify(offer));
+    }
       if (kind === "audio") {
         setAudioDeviceId(deviceId);
       } else {
@@ -766,6 +927,9 @@ export default function RoomPage() {
     localStreamRef.current?.getVideoTracks().forEach((track) => {
       track.enabled = next;
     });
+    if (cameraTrackRef.current) {
+      cameraTrackRef.current.enabled = next;
+    }
     setCameraOn(next);
     hubRef.current?.invoke("CameraState", id, next).catch(() => undefined);
   }
@@ -1137,6 +1301,14 @@ export default function RoomPage() {
             >
               <FullscreenIcon className="h-5 w-5" />
             </button>
+            <EffectsPanel
+              variant="meeting"
+              open={effectsOpen}
+              onOpenChange={setEffectsOpen}
+              selected={backgroundEffect}
+              onSelect={(effect) => void applyBackgroundEffect(effect)}
+              error={effectError}
+            />
             <button
               type="button"
               onClick={() => {
@@ -1380,7 +1552,7 @@ export default function RoomPage() {
                     )}
                     <p className="absolute bottom-2 left-3 text-sm text-white/90">{user?.name ?? guestName}</p>
                   </div>
-                  <div className="mt-4 flex items-center justify-center gap-3">
+                  <div className="relative mt-4 flex items-center justify-center gap-3">
                     <MicLevelMeter level={micLevel} />
                     <button
                       type="button"
@@ -1408,6 +1580,14 @@ export default function RoomPage() {
                     >
                       {previewCameraOn ? <CameraIcon className="h-5 w-5" /> : <CameraOffIcon className="h-5 w-5" />}
                     </button>
+                    <EffectsPanel
+                      variant="preview"
+                      open={effectsOpen}
+                      onOpenChange={setEffectsOpen}
+                      selected={backgroundEffect}
+                      onSelect={(effect) => void applyBackgroundEffect(effect)}
+                      error={effectError}
+                    />
                   </div>
                   <div className="mt-4 flex flex-wrap items-center justify-center gap-4">
                     <label className="flex flex-col items-start gap-1 text-xs font-medium text-ink-3">

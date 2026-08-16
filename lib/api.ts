@@ -26,7 +26,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
 
 export function resolvePhotoUrl(photoUrl: string | null | undefined): string | null {
   if (!photoUrl) {

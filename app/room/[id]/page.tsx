@@ -25,11 +25,10 @@ import {
   StopScreenShareIcon,
   UsersIcon,
 } from "@/components/logo";
-import { ApiError, apiRequest, authApi, type MeetingResponse } from "@/lib/api";
+import { ApiError, apiRequest, authApi, API_URL, type MeetingResponse } from "@/lib/api";
 import { createBackgroundEffectEngine, type BackgroundEffect, type BackgroundEffectEngine } from "@/lib/background-effects";
 import { EffectsPanel } from "@/components/effects-panel";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5028";
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 
 function newParticipantId() {
